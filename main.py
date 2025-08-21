@@ -14,7 +14,7 @@ from typing import Optional, List
 
 app = FastAPI(title="Braintree Card Checker API", version="1.0.0")
 
-PROXY = None  # Configure your proxy here
+PROXY = 'resi.legionproxy.io:9595:vUdAfD9RPXV8j2dX-res-any:MtsnNTSFWKsZoxJ4'  # Configure your proxy here
 
 class CardRequest(BaseModel):
     card: str
