@@ -9,7 +9,7 @@ import uuid
 import datetime
 import os
 import random
-from typing import Optional
+from typing import Optional, Dict, Any
 
 app = FastAPI(title="Braintree Card Checker API", version="1.0.0")
 
@@ -19,7 +19,7 @@ class CardRequest(BaseModel):
 class CardResponse(BaseModel):
     status: str
     message: str
-    card_info: dict = None
+    card_info: Optional[Dict[Any, Any]] = None
     tds_status: Optional[str] = None
     enrolled: Optional[str] = None
 
@@ -128,10 +128,10 @@ def get_ip_address():
             return resp.json().get("ip", "")
         else:
             print(f"[ERROR] Failed to get IP address: {resp.status_code}")
-            return "8.8.8.8"  # Fallback IP
+            return "8.8.8.8"
     except Exception as e:
         print(f"[ERROR] Failed to get IP address: {e}")
-        return "8.8.8.8"  # Fallback IP
+        return "8.8.8.8"
 
 def braintree_payment(card_data):
     card_num, card_mm, card_yy, card_cvv = card_data
@@ -403,6 +403,9 @@ def braintree_payment(card_data):
         except Exception:
             return "error", "Failed to parse 3D Secure info"
 
+        # Continúa con el resto del código igual...
+        # (REQ 6 y REQ 7 igual que antes)
+
         # REQ 6: POST to get cart id
         resp = session.post(
             "https://nammanmuay.eu/?wc-ajax=bwfan_insert_abandoned_cart&wfacp_id=54599&wfacp_is_checkout_override=yes",
@@ -567,21 +570,12 @@ def root():
     return {
         "message": "Braintree Card Checker API", 
         "version": "1.0.0",
-        "status": "running",
-        "endpoints": {
-            "check_card": "/check-card",
-            "health": "/health",
-            "docs": "/docs"
-        }
+        "status": "running"
     }
 
 @app.get("/health")
 def health():
-    return {
-        "status": "healthy",
-        "timestamp": datetime.datetime.now().isoformat(),
-        "service": "Braintree Card Checker API"
-    }
+    return {"status": "healthy"}
 
 @app.post("/check-card", response_model=CardResponse)
 def check_card(request: CardRequest):
@@ -615,11 +609,6 @@ def check_card(request: CardRequest):
                     "card_type": card_type(card[0]),
                     "expiry": f"{card[1]}/{card[2]}"
                 }
-            )
-        else:
-            return CardResponse(
-                status="Error",
-                message=str(result)
             )
 
     except Exception as e:
