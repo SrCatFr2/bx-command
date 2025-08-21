@@ -1,5 +1,5 @@
-fastapi==0.104.1
-uvicorn==0.24.0
-requests==2.31.0
-beautifulsoup4==4.12.2
-pydantic==2.5.0
+fastapi==0.65.2
+uvicorn==0.13.4
+requests==2.25.1
+beautifulsoup4==4.9.3
+pydantic==1.7.4
