@@ -16,7 +16,7 @@ import os
 app = FastAPI(title="Braintree Card Checker API", version="1.0.0")
 
 # Configuración de proxy desde variable de entorno
-PROXY = os.getenv("PROXY")  # Format: proxy:port:username:password
+PROXY = 'resi.legionproxy.io:9595:vUdAfD9RPXV8j2dX-res-any:MtsnNTSFWKsZoxJ4'  # Format: proxy:port:username:password
 
 class CardRequest(BaseModel):
     card: str
