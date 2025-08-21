@@ -19,7 +19,7 @@ class CardRequest(BaseModel):
 class CardResponse(BaseModel):
     status: str
     message: str
-    card_info: Optional[Dict[Any, Any]] = None
+    card_info: Optional[Dict[str, Any]] = None
     tds_status: Optional[str] = None
     enrolled: Optional[str] = None
 
@@ -403,9 +403,6 @@ def braintree_payment(card_data):
         except Exception:
             return "error", "Failed to parse 3D Secure info"
 
-        # Continúa con el resto del código igual...
-        # (REQ 6 y REQ 7 igual que antes)
-
         # REQ 6: POST to get cart id
         resp = session.post(
             "https://nammanmuay.eu/?wc-ajax=bwfan_insert_abandoned_cart&wfacp_id=54599&wfacp_is_checkout_override=yes",
@@ -570,12 +567,21 @@ def root():
     return {
         "message": "Braintree Card Checker API", 
         "version": "1.0.0",
-        "status": "running"
+        "status": "running",
+        "endpoints": {
+            "check_card": "/check-card",
+            "health": "/health",
+            "docs": "/docs"
+        }
     }
 
 @app.get("/health")
 def health():
-    return {"status": "healthy"}
+    return {
+        "status": "healthy",
+        "timestamp": datetime.datetime.now().isoformat(),
+        "service": "Braintree Card Checker API"
+    }
 
 @app.post("/check-card", response_model=CardResponse)
 def check_card(request: CardRequest):
@@ -609,6 +615,11 @@ def check_card(request: CardRequest):
                     "card_type": card_type(card[0]),
                     "expiry": f"{card[1]}/{card[2]}"
                 }
+            )
+        else:
+            return CardResponse(
+                status="Error",
+                message=str(result[0]) if result else "Unknown error"
             )
 
     except Exception as e:
